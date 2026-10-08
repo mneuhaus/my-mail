@@ -264,7 +264,7 @@ pub fn tools() -> Vec<Value> {
         "description": "Addresses: a list of strings or one comma-separated string; 'Name <a@b.c>' works",
         "anyOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }]
     });
-    let body = json!({ "type": "string", "description": "The text you write (plain text unless html is true). Signature and quoted mail are added below it." });
+    let body = json!({ "type": "string", "description": "The text you write (plain text unless html is true). Signature and quoted mail are added below it. The signature already carries the closing ('Herzliche Grüße aus Gütersloh / Marc Neuhaus'), so with the signature on, do NOT end the body with a greeting or name." });
     let html = json!({ "type": "boolean", "description": "body is HTML (default: plain text)" });
     let signature = json!({ "type": "boolean", "description": "Append the account signature (default true)" });
     let files = json!({ "type": "array", "items": { "type": "string" }, "description": "Local file paths to attach (max 3 MB each)" });

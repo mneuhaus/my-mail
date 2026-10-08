@@ -27,6 +27,8 @@ Examples:
   jm --json list -a invoice -n 5       one JSON object on stdout
 
 Message ids: listings show 8-character short ids; any unique prefix or the full Graph id works.
+Drafts get the account signature, which already carries the closing (\"Herzliche Grüße …\"): end
+the body without a greeting unless --no-signature.
 Exit codes: 0 ok, 1 general/Graph, 2 auth, 3 validation, 4 not found, 5 network.
 Sending is not possible here: drafts are reviewed and sent in the Just Mail app.
 Config, sign-ins and the short id index live in ~/.config/just-mail (JUST_MAIL_HOME moves it).";
@@ -54,9 +56,9 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// List accounts, or add, import or remove one
+    /// List accounts, or add, import or remove one, or show their signatures
     #[command(
-        after_help = "Examples:\n  jm accounts\n  jm accounts import     take over the ms365-mail sign-ins\n  jm accounts add        sign in with a device code"
+        after_help = "Examples:\n  jm accounts\n  jm accounts import     take over the ms365-mail sign-ins\n  jm accounts add        sign in with a device code\n  jm accounts signatures --from-spark"
     )]
     Accounts {
         #[command(subcommand)]
@@ -201,6 +203,15 @@ enum AccountsCommand {
         /// Account id or address
         id: String,
     },
+    /// Show each account's signature (html, text or none)
+    #[command(
+        after_help = "Examples:\n  jm accounts signatures\n  jm accounts signatures --from-spark     take over the signatures Spark binds to the addresses\n\nAn HTML signature wins over the text one, which stays as fallback. Images in it go into\ndrafts as inline attachments. Accounts without a Spark binding keep their signature."
+    )]
+    Signatures {
+        /// Import the HTML signatures from Spark (by address) first
+        #[arg(long)]
+        from_spark: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -249,7 +260,7 @@ enum DraftsCommand {
     },
     /// Create a new draft (with the account signature)
     #[command(
-        after_help = "Examples:\n  jm drafts create --to max@example.com --subject \"Angebot\" --body \"Hallo Max, anbei das Angebot.\"\n  jm drafts create --to \"Max <max@example.com>, eva@example.com\" --subject Hi --body-file text.txt --attach angebot.pdf\n  echo \"Hallo\" | jm drafts create --to max@example.com --subject Hi --body-file -"
+        after_help = "Examples:\n  jm drafts create --to max@example.com --subject \"Angebot\" --body \"Hallo Max, anbei das Angebot.\"\n  jm drafts create --to \"Max <max@example.com>, eva@example.com\" --subject Hi --body-file text.txt --attach angebot.pdf\n  echo \"Hallo\" | jm drafts create --to max@example.com --subject Hi --body-file -\n\nThe signature carries the closing greeting: don't end the body with one (unless --no-signature)."
     )]
     Create {
         /// Recipients (repeat or comma-separate; "Name <address>" works)
@@ -268,7 +279,7 @@ enum DraftsCommand {
     },
     /// Create a reply draft: your text and signature above the quoted mail
     #[command(
-        after_help = "Examples:\n  jm drafts reply a1b2c3d4 --body \"Danke, passt so.\"\n  jm drafts reply a1b2c3d4 --all --body-file antwort.txt --attach plan.pdf"
+        after_help = "Examples:\n  jm drafts reply a1b2c3d4 --body \"Danke, passt so.\"\n  jm drafts reply a1b2c3d4 --all --body-file antwort.txt --attach plan.pdf\n\nThe signature carries the closing greeting: don't end the body with one (unless --no-signature)."
     )]
     Reply {
         /// Message to answer
@@ -424,6 +435,7 @@ fn run(cli: Cli) -> Result<Outcome> {
             Some(AccountsCommand::Add) => (View::AccountChange, ops::accounts_add()?),
             Some(AccountsCommand::Import) => (View::AccountChange, ops::accounts_import()?),
             Some(AccountsCommand::Remove { id }) => (View::AccountChange, ops::accounts_remove(&id)?),
+            Some(AccountsCommand::Signatures { from_spark }) => (View::Signatures, ops::accounts_signatures(from_spark)?),
         },
         Command::Folders => (View::Folders, ops::folders(&ctx()?)?),
         Command::List(a) => {
@@ -649,6 +661,14 @@ mod tests {
         let both = ["jm", "drafts", "create", "--to", "a@b.c", "--subject", "x", "--body", "y", "--body-file", "z"];
         assert!(Cli::try_parse_from(both).is_err());
         parse(&["jm", "drafts", "create", "--to", "a@b.c", "--subject", "x", "--body", "y", "--no-signature"]);
+    }
+
+    #[test]
+    fn signatures_take_an_optional_spark_import() {
+        let cli = parse(&["jm", "accounts", "signatures", "--from-spark", "--json"]);
+        assert!(matches!(cli.command, Command::Accounts { action: Some(AccountsCommand::Signatures { from_spark: true }) }));
+        let cli = parse(&["jm", "accounts", "signatures"]);
+        assert!(matches!(cli.command, Command::Accounts { action: Some(AccountsCommand::Signatures { from_spark: false }) }));
     }
 
     #[test]

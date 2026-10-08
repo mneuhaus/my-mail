@@ -15,7 +15,7 @@ use jm_core::events::{self, Event};
 use jm_core::graph::{self, ListQuery};
 use jm_core::{
     AccountConfig, Attachment, Config, DraftInput, Error, FlagStatus, Mailbox, Message, NewAttachment, Recipient,
-    Result, auth, html, ids, paths,
+    Result, auth, html, ids, paths, spark,
 };
 use serde_json::{Value, json};
 
@@ -266,8 +266,29 @@ fn account_json(config: &Config, a: &AccountConfig) -> Value {
         "name": a.name,
         "read_only": a.read_only,
         "signed_in": paths::token_file(&a.id).is_file(),
-        "signature": !a.signature.trim().is_empty(),
+        "signature": a.signature_block().is_some(),
         "default": config.accounts.first().map(|f| f.id == a.id).unwrap_or(false),
+    })
+}
+
+/// Which signature an account uses: `html`, `text` or `none`, and its first line of text.
+fn signature_json(a: &AccountConfig) -> Value {
+    let kind = if !a.signature_html.trim().is_empty() {
+        "html"
+    } else if !a.signature.trim().is_empty() {
+        "text"
+    } else {
+        "none"
+    };
+    let text = a.signature_block().map(|block| html::html_to_text(&block)).unwrap_or_default();
+    let first_line = text.lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_string);
+    json!({
+        "id": a.id,
+        "email": a.email,
+        "type": kind,
+        "first_line": first_line,
+        "has_text_fallback": !a.signature.trim().is_empty(),
+        "read_only": a.read_only,
     })
 }
 
@@ -341,6 +362,18 @@ pub fn accounts_import() -> Result<Value> {
     Ok(
         json!({ "action": "imported", "imported": imported, "failed": failed, "accounts": accounts(&config)["accounts"] }),
     )
+}
+
+/// The signature of every account; with `from_spark`, first take over the signatures Spark binds
+/// to the accounts' addresses (as HTML; the text signature stays as fallback).
+pub fn accounts_signatures(from_spark: bool) -> Result<Value> {
+    let mut config = Config::load()?;
+    let changed = if from_spark { Some(spark::import_signatures(&mut config)?) } else { None };
+    let signatures: Vec<Value> = config.accounts.iter().map(signature_json).collect();
+    Ok(match changed {
+        Some(changed) => json!({ "action": "imported", "source": "spark", "changed": changed, "signatures": signatures }),
+        None => json!({ "signatures": signatures }),
+    })
 }
 
 pub fn accounts_remove(key: &str) -> Result<Value> {
@@ -775,10 +808,33 @@ mod tests {
     #[test]
     fn body_and_signature_assemble_into_marked_blocks() {
         let body = body_html(Some("Hi\nthere"), None, false).unwrap().unwrap();
-        let doc = html::new_document(&body, "Marc Neuhaus\nRoothirsch GmbH");
+        let doc = html::new_document(&body, &html::text_to_html("Marc Neuhaus\nRoothirsch GmbH"));
         assert_eq!(html::author_html(&doc).map(html::html_to_text).as_deref(), Some("Hi\nthere"));
         assert!(html::has_signature(&doc));
         assert!(doc.find("jm-body").unwrap() < doc.find("Roothirsch GmbH").unwrap());
+    }
+
+    #[test]
+    fn signatures_report_their_kind_and_first_line() {
+        let mut a = AccountConfig {
+            id: "marc".into(),
+            email: "marc@roothirsch.com".into(),
+            name: String::new(),
+            signature: "\nMarc Neuhaus\nRoothirsch GmbH".into(),
+            signature_html: String::new(),
+            read_only: false,
+        };
+        let text = signature_json(&a);
+        assert_eq!((text["type"].as_str(), text["first_line"].as_str()), (Some("text"), Some("Marc Neuhaus")));
+        a.signature_html = "<div>Herzliche Grüße aus Gütersloh<br>Marc Neuhaus</div><div><img src=\"x\"></div>".into();
+        let rich = signature_json(&a);
+        assert_eq!(rich["type"], "html");
+        assert_eq!(rich["first_line"], "Herzliche Grüße aus Gütersloh");
+        assert_eq!(rich["has_text_fallback"], true);
+        a.signature_html.clear();
+        a.signature.clear();
+        assert_eq!(signature_json(&a)["type"], "none");
+        assert!(signature_json(&a)["first_line"].is_null());
     }
 
     #[test]

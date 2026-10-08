@@ -406,14 +406,20 @@ impl Mailbox {
 
     // ---- drafts --------------------------------------------------------------------------
 
-    fn signature(&self, with_signature: bool) -> &str {
-        if with_signature { &self.account.signature } else { "" }
+    /// The account signature ready for a draft: its HTML with `data:` images turned into `cid:`
+    /// references, and the inline attachments those need. Empty without a signature.
+    fn signature_parts(&self, with_signature: bool) -> (String, Vec<html::InlineImage>) {
+        match self.account.signature_block().filter(|_| with_signature) {
+            Some(signature) => html::inline_data_images(&signature, "signature", &content_id_token()),
+            None => (String::new(), Vec::new()),
+        }
     }
 
     /// A new draft in Drafts. `input.body_html` is the author's part; the signature follows.
     pub fn create_draft(&self, input: &DraftInput, with_signature: bool, files: &[NewAttachment]) -> Result<Message> {
         self.guard_writable()?;
-        let body = html::new_document(input.body_html.as_deref().unwrap_or(""), self.signature(with_signature));
+        let (signature, images) = self.signature_parts(with_signature);
+        let body = html::new_document(input.body_html.as_deref().unwrap_or(""), &signature);
         let mut msg = json!({
             "subject": input.subject.clone().unwrap_or_default(),
             "body": { "contentType": "HTML", "content": body },
@@ -424,15 +430,17 @@ impl Mailbox {
         if let Some(importance) = &input.importance {
             msg["importance"] = json!(importance);
         }
-        if !files.is_empty() {
-            msg["attachments"] = Value::Array(files.iter().map(file_attachment).collect::<Result<_>>()?);
+        if !files.is_empty() || !images.is_empty() {
+            let mut attachments: Vec<Value> = files.iter().map(file_attachment).collect::<Result<_>>()?;
+            attachments.extend(images.iter().map(inline_attachment));
+            msg["attachments"] = Value::Array(attachments);
         }
         let created: Message = self.json("POST", "/me/messages", PREFER_IDS, Some(&msg))?;
         self.message(&created.id)
     }
 
     /// Change a draft. A new body replaces only the author's part when the draft has Just
-    /// Mail's markers (signature and quote stay), otherwise the whole body.
+    /// Mail's markers (signature and quote stay), otherwise the whole body (with the signature).
     pub fn update_draft(&self, id: &str, input: &DraftInput) -> Result<Message> {
         self.guard_writable()?;
         let mut patch = json!({});
@@ -451,16 +459,22 @@ impl Mailbox {
         if let Some(importance) = &input.importance {
             patch["importance"] = json!(importance);
         }
+        let mut images = Vec::new();
         if let Some(body_html) = &input.body_html {
             let current = self.message(id)?;
             if !current.is_draft {
                 return Err(Error::validation("this message is not a draft"));
             }
             let old = current.body.map(|b| b.content).unwrap_or_default();
-            let new = html::replace_author_html(&old, body_html, &self.account.signature);
+            let new = html::replace_author_html(&old, body_html).unwrap_or_else(|| {
+                let (signature, signature_images) = self.signature_parts(true);
+                images = signature_images;
+                html::new_document(body_html, &signature)
+            });
             patch["body"] = json!({ "contentType": "HTML", "content": new });
         }
         self.patch(id, patch)?;
+        self.add_inline_images(id, &images)?;
         self.message(id)
     }
 
@@ -493,13 +507,24 @@ impl Mailbox {
     fn fill_answer(&self, draft_id: &str, body_html: &str, with_signature: bool, to: Option<&[Recipient]>) -> Result<Message> {
         let draft = self.message(draft_id)?;
         let quote = draft.body.map(|b| b.content).unwrap_or_default();
-        let blocks = html::compose_blocks(body_html, self.signature(with_signature));
+        let (signature, images) = self.signature_parts(with_signature);
+        let blocks = html::compose_blocks(body_html, &signature);
         let mut patch = json!({ "body": { "contentType": "HTML", "content": html::insert_at_top(&quote, &blocks) } });
         if let Some(to) = to {
             patch["toRecipients"] = recipients(Some(to));
         }
         self.patch(draft_id, patch)?;
+        self.add_inline_images(draft_id, &images)?;
         self.message(draft_id)
+    }
+
+    /// Attach the images a body references with `cid:` (signature logos).
+    fn add_inline_images(&self, draft_id: &str, images: &[html::InlineImage]) -> Result<()> {
+        for image in images {
+            let url = format!("/me/messages/{}/attachments", enc(draft_id));
+            self.call("POST", &url, PREFER_IDS, Some(&inline_attachment(image)))?;
+        }
+        Ok(())
     }
 
     pub fn add_attachment(&self, draft_id: &str, file: &NewAttachment) -> Result<Attachment> {
@@ -555,6 +580,24 @@ fn file_attachment(file: &NewAttachment) -> Result<Value> {
         "contentType": file.content_type,
         "contentBytes": base64::engine::general_purpose::STANDARD.encode(&file.bytes),
     }))
+}
+
+fn inline_attachment(image: &html::InlineImage) -> Value {
+    use base64::Engine as _;
+    json!({
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "name": image.name,
+        "contentType": image.content_type,
+        "contentBytes": base64::engine::general_purpose::STANDARD.encode(&image.bytes),
+        "isInline": true,
+        "contentId": image.content_id,
+    })
+}
+
+/// A token that keeps the content ids of one draft's inline images apart from any other's.
+fn content_id_token() -> String {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    format!("jm-{nanos:x}")
 }
 
 fn order_tree(all: Vec<Folder>) -> Vec<Folder> {

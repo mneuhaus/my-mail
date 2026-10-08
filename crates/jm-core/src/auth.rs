@@ -203,6 +203,7 @@ pub fn register_account(config: &mut Config, token: Token) -> Result<AccountConf
         email,
         name: me.display_name.unwrap_or_default(),
         signature: String::new(),
+        signature_html: String::new(),
         read_only: false,
     };
     config.upsert(account.clone());

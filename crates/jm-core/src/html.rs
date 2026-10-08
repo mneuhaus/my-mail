@@ -30,21 +30,101 @@ pub fn text_to_html(text: &str) -> String {
         .join("<br>\n")
 }
 
-/// The marked author block followed by the signature block (if any).
-pub fn compose_blocks(body_html: &str, signature_text: &str) -> String {
+/// The marked author block followed by the signature block (if `signature_html` isn't blank,
+/// see [`crate::AccountConfig::signature_block`]).
+pub fn compose_blocks(body_html: &str, signature_html: &str) -> String {
     let mut out = format!("<div id=\"{BODY_ID}\" style=\"{FONT}\">{body_html}</div>\n");
-    if !signature_text.trim().is_empty() {
-        out.push_str(&format!(
-            "<div id=\"{SIGNATURE_ID}\" style=\"{FONT}\"><br>\n{}</div>\n",
-            text_to_html(signature_text.trim_end())
-        ));
+    if !signature_html.trim().is_empty() {
+        out.push_str(&format!("<div id=\"{SIGNATURE_ID}\" style=\"{FONT}\"><br>\n{}</div>\n", signature_html.trim()));
     }
     out
 }
 
 /// A complete HTML document for a new mail.
-pub fn new_document(body_html: &str, signature_text: &str) -> String {
-    format!("<html><body>\n{}</body></html>", compose_blocks(body_html, signature_text))
+pub fn new_document(body_html: &str, signature_html: &str) -> String {
+    format!("<html><body>\n{}</body></html>", compose_blocks(body_html, signature_html))
+}
+
+/// An image taken out of the HTML for an inline attachment (`<img src="cid:…">`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineImage {
+    pub content_id: String,
+    pub name: String,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Turn every `<img src="data:image/…;base64,…">` into a `cid:` reference and return the images
+/// as inline attachments to add (Outlook blocks `data:` images). Files are named
+/// `{stem}-1.png`, `{stem}-2.jpg`, …; content ids are `{name}@{token}`, so a token unique per
+/// draft keeps them apart from the ids a quoted mail brings along. Images that don't decode stay.
+pub fn inline_data_images(html: &str, stem: &str, token: &str) -> (String, Vec<InlineImage>) {
+    use base64::Engine as _;
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len());
+    let mut images = Vec::new();
+    let mut copied = 0;
+    let mut search = 0;
+    while let Some(i) = lower[search..].find("<img").map(|i| search + i) {
+        let tag_end = lower[i..].find('>').map(|e| i + e).unwrap_or(lower.len());
+        search = tag_end;
+        let Some((start, end)) = src_value(&lower, i, tag_end) else { continue };
+        let value = &html[start..end];
+        let Some((content_type, data)) = value
+            .strip_prefix("data:")
+            .and_then(|v| v.split_once(','))
+            .and_then(|(meta, data)| Some((meta.strip_suffix(";base64")?, data)))
+            .filter(|(meta, _)| meta.to_ascii_lowercase().starts_with("image/"))
+        else {
+            continue;
+        };
+        let data: String = data.chars().filter(|c| !c.is_whitespace()).collect();
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD_NO_PAD.decode(data.trim_end_matches('=')) else {
+            continue;
+        };
+        let content_type = content_type.to_ascii_lowercase();
+        let ext = match content_type.trim_start_matches("image/") {
+            "jpeg" | "pjpeg" => "jpg",
+            "svg+xml" => "svg",
+            other => other,
+        };
+        let name = format!("{stem}-{}.{ext}", images.len() + 1);
+        let content_id = format!("{name}@{token}");
+        out.push_str(&html[copied..start]);
+        out.push_str(&format!("cid:{content_id}"));
+        copied = end;
+        images.push(InlineImage { content_id, name, content_type, bytes });
+    }
+    out.push_str(&html[copied..]);
+    (out, images)
+}
+
+/// Byte range of the `src` attribute value inside the tag `lower[tag_start..tag_end]`.
+fn src_value(lower: &str, tag_start: usize, tag_end: usize) -> Option<(usize, usize)> {
+    let tag = &lower[tag_start..tag_end];
+    let mut from = 0;
+    let attr = loop {
+        let at = from + tag[from..].find("src")?;
+        let before = tag[..at].chars().next_back();
+        from = at + 3;
+        if before.is_some_and(char::is_whitespace) && tag[from..].trim_start().starts_with('=') {
+            break at;
+        }
+    };
+    let after_eq = attr + 3 + tag[attr + 3..].find('=')? + 1;
+    let rest = &tag[after_eq..];
+    let value_start = after_eq + (rest.len() - rest.trim_start().len());
+    let (start, end) = match tag[value_start..].chars().next()? {
+        quote @ ('"' | '\'') => {
+            let start = value_start + 1;
+            (start, start + tag[start..].find(quote)?)
+        }
+        _ => {
+            let len = tag[value_start..].find(|c: char| c.is_whitespace() || c == '>').unwrap_or(tag.len() - value_start);
+            (value_start, value_start + len)
+        }
+    };
+    Some((tag_start + start, tag_start + end))
 }
 
 /// Put `blocks` at the very top of an existing document (above a reply's quote).
@@ -109,13 +189,10 @@ pub fn author_html(document: &str) -> Option<&str> {
     element_inner(document, BODY_ID).map(|(s, e)| &document[s..e])
 }
 
-/// Replace the author's part of a draft. Without markers the whole body is replaced
-/// (keeping nothing of the old content).
-pub fn replace_author_html(document: &str, body_html: &str, signature_text: &str) -> String {
-    match element_inner(document, BODY_ID) {
-        Some((s, e)) => format!("{}{}{}", &document[..s], body_html, &document[e..]),
-        None => new_document(body_html, signature_text),
-    }
+/// Replace the author's part of a draft, leaving signature and quote as they are. `None` when
+/// the draft has no Just Mail markers (the caller then builds a whole new document).
+pub fn replace_author_html(document: &str, body_html: &str) -> Option<String> {
+    element_inner(document, BODY_ID).map(|(s, e)| format!("{}{}{}", &document[..s], body_html, &document[e..]))
 }
 
 /// Whether the draft already carries a signature block.
@@ -301,9 +378,37 @@ mod tests {
         let doc = new_document("alt<br>\n<div>nested</div>", "Marc");
         assert_eq!(author_html(&doc), Some("alt<br>\n<div>nested</div>"));
         assert!(has_signature(&doc));
-        let changed = replace_author_html(&doc, "neu", "Marc");
+        let changed = replace_author_html(&doc, "neu").unwrap();
         assert_eq!(author_html(&changed), Some("neu"));
-        assert!(changed.contains("id=\"jm-signature\""));
+        assert_eq!(changed.matches("id=\"jm-signature\"").count(), 1);
+        assert_eq!(replace_author_html("<p>from Outlook</p>", "neu"), None);
+    }
+
+    #[test]
+    fn data_images_become_inline_attachments() {
+        // "PNG" and "JFIF" as base64, the second one wrapped and unpadded
+        let html = "<div>Gruß<br><IMG alt=\"logo\" SRC=\"data:image/png;base64,UE5H\"><br>\
+                    <img data-src=\"x\" src='data:image/jpeg;base64,SkZ\n JRg'>\
+                    <img src=\"https://example.com/remote.png\"><img src=\"data:image/png;base64,!!!\"></div>";
+        let (out, images) = inline_data_images(html, "signature", "jm-1a2b");
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].name, "signature-1.png");
+        assert_eq!(images[0].content_id, "signature-1.png@jm-1a2b");
+        assert_eq!((images[0].content_type.as_str(), images[0].bytes.as_slice()), ("image/png", b"PNG".as_slice()));
+        assert_eq!((images[1].name.as_str(), images[1].bytes.as_slice()), ("signature-2.jpg", b"JFIF".as_slice()));
+        assert!(out.contains("<IMG alt=\"logo\" SRC=\"cid:signature-1.png@jm-1a2b\">"), "{out}");
+        assert!(out.contains("data-src=\"x\" src='cid:signature-2.jpg@jm-1a2b'"), "{out}");
+        // remote and broken images stay as they were
+        assert!(out.contains("https://example.com/remote.png") && out.contains("base64,!!!"));
+        assert_eq!(inline_data_images("<p>no images</p>", "s", "t"), ("<p>no images</p>".to_string(), vec![]));
+    }
+
+    #[test]
+    fn signature_html_goes_into_its_own_block() {
+        let doc = new_document("Hallo", "<div>Herzliche Grüße<br>Marc</div>");
+        assert!(doc.contains("<div id=\"jm-signature\" style=\""));
+        assert!(doc.contains("<br>\n<div>Herzliche Grüße<br>Marc</div></div>"));
+        assert!(!new_document("Hallo", "  ").contains("jm-signature"));
     }
 
     #[test]

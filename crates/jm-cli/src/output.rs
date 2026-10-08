@@ -8,6 +8,7 @@ use serde_json::Value;
 pub enum View {
     Accounts,
     AccountChange,
+    Signatures,
     Folders,
     Messages,
     Message,
@@ -28,6 +29,7 @@ pub fn render(view: View, v: &Value) -> String {
     match view {
         View::Accounts => accounts(v),
         View::AccountChange => account_change(v),
+        View::Signatures => signatures(v),
         View::Folders => folders(v),
         View::Messages => messages(v),
         View::Message => message(&v["message"], false),
@@ -145,6 +147,36 @@ fn account_change(v: &Value) -> String {
         "removed" => format!("removed {} ({})\n", s(&v["account"]["id"]), s(&v["account"]["email"])),
         _ => format!("added {} ({})\n", s(&v["account"]["id"]), s(&v["account"]["email"])),
     }
+}
+
+/// `marc     html  Herzliche Grüße aus Gütersloh` per account, after an import the changes first.
+fn signatures(v: &Value) -> String {
+    let mut out = String::new();
+    if s(&v["action"]) == "imported" {
+        let changed: Vec<&str> = v["changed"].as_array().into_iter().flatten().map(s).collect();
+        out.push_str(&if changed.is_empty() {
+            "imported from Spark: no account changed\n".to_string()
+        } else {
+            format!("imported from Spark: {}\n", changed.join(", "))
+        });
+    }
+    let list = v["signatures"].as_array().cloned().unwrap_or_default();
+    let id_width = list.iter().map(|a| s(&a["id"]).chars().count()).max().unwrap_or(0);
+    for a in &list {
+        let mut line = format!("{:<id_width$}  {:<4}", s(&a["id"]), s(&a["type"]));
+        if let Some(first) = a["first_line"].as_str() {
+            line.push_str(&format!("  {}", truncate(first, 60)));
+        }
+        if s(&a["type"]) == "html" && yes(&a["has_text_fallback"]) {
+            line.push_str("  (text fallback kept)");
+        }
+        if yes(&a["read_only"]) {
+            line.push_str("  [read-only]");
+        }
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
 }
 
 fn folders(v: &Value) -> String {

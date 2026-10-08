@@ -1,8 +1,8 @@
 //! Just Mail core: Microsoft 365 mailboxes over Microsoft Graph.
 //!
 //! Shared by the desktop app and the `jm` CLI so both see the same accounts, tokens,
-//! signatures and short message ids. Everything here is blocking; the app calls it on
-//! background threads.
+//! signatures (also imported from Spark) and short message ids. Everything here is blocking;
+//! the app calls it on background threads.
 //!
 //! Sending lives behind the `send` cargo feature, which only the app enables.
 
@@ -15,6 +15,7 @@ pub mod html;
 pub mod ids;
 pub mod model;
 pub mod paths;
+pub mod spark;
 
 pub use config::{AccountConfig, Config};
 pub use error::{Error, ErrorCode, Result};

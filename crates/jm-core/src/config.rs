@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::paths;
+use crate::{html, paths};
 
 /// Microsoft app registration used for sign-in (the one `ms365-mail` uses, so its
 /// sign-ins can be imported without asking for consent again).
@@ -27,13 +27,31 @@ pub struct AccountConfig {
     pub email: String,
     #[serde(default)]
     pub name: String,
-    /// Plain text appended to new mails, replies and forwards.
+    /// Plain text appended to new mails, replies and forwards (when there is no HTML signature).
     #[serde(default)]
     pub signature: String,
+    /// HTML signature (imported from Spark); wins over the text `signature` when set. Images may
+    /// be `data:` URIs: drafts get them as inline attachments.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub signature_html: String,
     /// Look, don't touch: no marking as read, flags, moves, deletes or drafts. For mailboxes
     /// another system processes (invoice@ is read by webIC).
     #[serde(default)]
     pub read_only: bool,
+}
+
+impl AccountConfig {
+    /// The signature as HTML: the HTML signature, else the text one converted, `None` when the
+    /// account has neither.
+    pub fn signature_block(&self) -> Option<String> {
+        if !self.signature_html.trim().is_empty() {
+            Some(self.signature_html.trim().to_string())
+        } else if !self.signature.trim().is_empty() {
+            Some(html::text_to_html(self.signature.trim_end()))
+        } else {
+            None
+        }
+    }
 }
 
 impl Config {
@@ -76,7 +94,7 @@ impl Config {
     }
 
     /// Add an account, or refresh name and address of a known one (matched by email; its id,
-    /// signature and read-only setting stay).
+    /// signatures and read-only setting stay).
     pub fn upsert(&mut self, account: AccountConfig) {
         match self.accounts.iter_mut().find(|a| a.email.eq_ignore_ascii_case(&account.email)) {
             Some(existing) => {
