@@ -46,8 +46,12 @@ struct Cli {
     #[arg(long, global = true, env = "JM_JSON", action = ArgAction::SetTrue, value_parser = FalseyValueParser::new())]
     json: bool,
 
+    /// Same as --json when "json" (ms365-mail spelling)
+    #[arg(long, global = true, hide = true, value_name = "json|table")]
+    format: Option<String>,
+
     /// Account id or address [default: the first account, or the account of a short id]
-    #[arg(short, long, global = true, env = "JM_ACCOUNT", value_name = "ID|EMAIL")]
+    #[arg(short, long, global = true, env = "JM_ACCOUNT", value_name = "ID|EMAIL", alias = "profile")]
     account: Option<String>,
 
     #[command(subcommand)]
@@ -75,15 +79,25 @@ enum Command {
     List(ListArgs),
 
     /// Full-text search over subject, body and people (whole mailbox unless -f)
-    #[command(after_help = "Examples:\n  jm search \"Angebot Fenster\"\n  jm search spark -f inbox -n 5")]
+    #[command(after_help = "Examples:\n  jm search \"Angebot Fenster\"\n  jm search spark -f inbox -n 5\n  jm search Rechnung --from telekom.de --attachments\n  jm search --subject Lohnzettel -f inbox -n 80")]
     Search {
-        query: String,
+        /// Words to look for (optional when a filter is given)
+        query: Option<String>,
         /// Only this folder
         #[arg(short, long)]
         folder: Option<String>,
         /// How many results
-        #[arg(short = 'n', long, default_value_t = 25)]
+        #[arg(short = 'n', long, default_value_t = 25, alias = "count")]
         limit: u32,
+        /// Only from this address or name
+        #[arg(long, value_name = "ADDRESS")]
+        from: Option<String>,
+        /// Only with these words in the subject
+        #[arg(long, value_name = "WORDS")]
+        subject: Option<String>,
+        /// Only with attachments
+        #[arg(long, alias = "has-attachments")]
+        attachments: bool,
     },
 
     /// Show one message: headers, readable text, attachments
@@ -220,7 +234,7 @@ struct ListArgs {
     #[arg(short, long, conflicts_with = "all")]
     folder: Option<String>,
     /// How many messages
-    #[arg(short = 'n', long, default_value_t = 25)]
+    #[arg(short = 'n', long, default_value_t = 25, alias = "count")]
     limit: u32,
     /// Only unread
     #[arg(long)]
@@ -229,7 +243,7 @@ struct ListArgs {
     #[arg(long)]
     flagged: bool,
     /// Only with attachments
-    #[arg(long)]
+    #[arg(long, alias = "has-attachments")]
     attachments: bool,
     /// Only from this address
     #[arg(long, value_name = "ADDRESS")]
@@ -237,6 +251,9 @@ struct ListArgs {
     /// Only newer than: 36h, 7d, 2w, today, yesterday, 2026-10-01 or an ISO time
     #[arg(long, value_name = "WHEN")]
     since: Option<String>,
+    /// Only older than (same forms as --since): `--since 2026-10-01 --until 2026-10-02` is one day
+    #[arg(long, value_name = "WHEN")]
+    until: Option<String>,
     /// Whole mailbox (all folders)
     #[arg(long)]
     all: bool,
@@ -447,12 +464,14 @@ fn run(cli: Cli) -> Result<Outcome> {
                 attachments: a.attachments,
                 from: a.from,
                 since: a.since,
+                until: a.until,
                 all: a.all,
                 next: a.next,
             };
             (View::Messages, ops::list(&ctx()?, &params)?)
         }
-        Command::Search { query, folder, limit } => {
+        Command::Search { query, folder, limit, from, subject, attachments } => {
+            let query = ops::search_query(query.as_deref(), from.as_deref(), subject.as_deref(), attachments)?;
             (View::Messages, ops::search(&ctx()?, &query, folder.as_deref(), limit)?)
         }
         Command::Show { id, html, raw } => {
@@ -577,7 +596,7 @@ fn exit(code: ErrorCode) -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    let json_asked = std::env::args().any(|a| a == "--json") || env_flag("JM_JSON");
+    let json_asked = std::env::args().any(|a| a == "--json" || a == "--format=json") || env_flag("JM_JSON");
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
@@ -604,7 +623,7 @@ fn main() -> ExitCode {
             }
         };
     }
-    let json = cli.json;
+    let json = cli.json || cli.format.as_deref() == Some("json");
     match run(cli) {
         Ok((view, value)) => {
             if json {

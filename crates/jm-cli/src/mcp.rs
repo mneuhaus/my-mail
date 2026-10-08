@@ -117,11 +117,20 @@ fn run_tool(name: &str, args: &Value) -> Result<Value> {
                 attachments: a.flag("attachments")?,
                 from: a.opt_str("from")?,
                 since: a.opt_str("since")?,
+                until: a.opt_str("until")?,
                 all: a.flag("all")?,
                 next: a.opt_str("next")?,
             },
         ),
-        "search_messages" => ops::search(&ctx()?, &a.str("query")?, a.opt_str("folder")?.as_deref(), a.limit()?),
+        "search_messages" => {
+            let query = ops::search_query(
+                a.opt_str("query")?.as_deref(),
+                a.opt_str("from")?.as_deref(),
+                a.opt_str("subject")?.as_deref(),
+                a.flag("attachments")?,
+            )?;
+            ops::search(&ctx()?, &query, a.opt_str("folder")?.as_deref(), a.limit()?)
+        }
         "get_message" => ops::show(&ctx()?, &a.str("id")?, a.flag("html")?, false),
         "download_attachments" => {
             let dir = a.opt_str("dir")?.map(PathBuf::from);
@@ -290,6 +299,7 @@ pub fn tools() -> Vec<Value> {
                 "attachments": { "type": "boolean", "description": "Only with attachments" },
                 "from": { "type": "string", "description": "Only from this address" },
                 "since": { "type": "string", "description": "Only newer than: 36h, 7d, 2w, today, yesterday, 2026-10-01 or an ISO time" },
+                "until": { "type": "string", "description": "Only older than (same forms as since)" },
                 "all": { "type": "boolean", "description": "Whole mailbox (all folders)" },
                 "next": { "type": "string", "description": "Continue a listing: its 'next' value" }
             }),
@@ -298,9 +308,16 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "search_messages",
-            "Full-text search over subject, body and people (whole mailbox unless a folder is given), newest first.",
-            json!({ "query": { "type": "string" }, "folder": folder, "limit": limit }),
-            &["query"],
+            "Full-text search over subject, body and people (whole mailbox unless a folder is given), newest first. Needs words or at least one filter.",
+            json!({
+                "query": { "type": "string", "description": "Words to look for" },
+                "from": { "type": "string", "description": "Only from this address or name" },
+                "subject": { "type": "string", "description": "Only with these words in the subject" },
+                "attachments": { "type": "boolean", "description": "Only with attachments" },
+                "folder": folder,
+                "limit": limit
+            }),
+            &[],
             true,
         ),
         tool(

@@ -78,6 +78,7 @@ pub struct ListParams {
     pub attachments: bool,
     pub from: Option<String>,
     pub since: Option<String>,
+    pub until: Option<String>,
     pub all: bool,
     /// Continue an earlier listing (its `next` value).
     pub next: Option<String>,
@@ -427,6 +428,7 @@ pub fn list(ctx: &Ctx, p: &ListParams) -> Result<Value> {
                 return Err(Error::validation("pick either a folder or the whole mailbox (all), not both"));
             }
             let since = p.since.as_deref().map(|s| parse_since(s, Local::now())).transpose()?;
+            let until = p.until.as_deref().map(|s| parse_since(s, Local::now())).transpose()?;
             let whole = p.all || (p.flagged && p.folder.is_none());
             let name = p.folder.clone().unwrap_or_else(|| "inbox".into());
             let folder = if whole { None } else { Some(mb.resolve_folder(&name)?) };
@@ -438,6 +440,7 @@ pub fn list(ctx: &Ctx, p: &ListParams) -> Result<Value> {
                 has_attachments: p.attachments,
                 from: p.from.clone().filter(|f| !f.trim().is_empty()),
                 since,
+                until,
             };
             (json!(if whole { "all".to_string() } else { name }), mb.list(&query)?)
         }
@@ -449,6 +452,28 @@ pub fn list(ctx: &Ctx, p: &ListParams) -> Result<Value> {
         "messages": messages_value(&mb, &page.messages),
         "next": page.next_link,
     }))
+}
+
+/// The search words plus filters as one Graph (KQL) query: `from:`, `subject:` and
+/// `hasattachments:true` restrict the search, so a filter alone is a valid search too.
+pub fn search_query(words: Option<&str>, from: Option<&str>, subject: Option<&str>, attachments: bool) -> Result<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(from) = from.map(str::trim).filter(|f| !f.is_empty()) {
+        parts.push(format!("from:{}", from.replace([' ', '"'], "")));
+    }
+    if let Some(subject) = subject {
+        parts.extend(subject.split_whitespace().map(|w| format!("subject:{}", w.replace('"', ""))));
+    }
+    if attachments {
+        parts.push("hasattachments:true".into());
+    }
+    if let Some(words) = words.map(str::trim).filter(|w| !w.is_empty()) {
+        parts.push(words.to_string());
+    }
+    if parts.is_empty() {
+        return Err(Error::validation("nothing to search for").hint("give words, --from, --subject or --attachments"));
+    }
+    Ok(parts.join(" "))
 }
 
 pub fn search(ctx: &Ctx, query: &str, folder: Option<&str>, limit: u32) -> Result<Value> {
@@ -757,6 +782,16 @@ mod tests {
 
     fn now() -> DateTime<Local> {
         Local.with_ymd_and_hms(2026, 10, 8, 15, 30, 0).unwrap()
+    }
+
+    #[test]
+    fn search_filters_become_kql() {
+        assert_eq!(
+            search_query(Some("Rechnung"), Some("billing@telekom.de"), None, true).unwrap(),
+            "from:billing@telekom.de hasattachments:true Rechnung"
+        );
+        assert_eq!(search_query(None, None, Some("Lohnzettel Mai"), false).unwrap(), "subject:Lohnzettel subject:Mai");
+        assert!(search_query(Some("  "), None, None, false).is_err());
     }
 
     #[test]

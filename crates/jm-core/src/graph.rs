@@ -81,6 +81,8 @@ pub struct ListQuery {
     pub has_attachments: bool,
     pub from: Option<String>,
     pub since: Option<DateTime<Utc>>,
+    /// Only mail received before this moment.
+    pub until: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -300,10 +302,14 @@ impl Mailbox {
             filters.push(format!("from/emailAddress/address eq '{}'", from.replace('\'', "''")));
         }
         let mut url = format!("{base}?$top={}&$select={SUMMARY_FIELDS}&$orderby=receivedDateTime desc", q.top.max(1));
-        if q.since.is_some() || !filters.is_empty() {
+        if q.since.is_some() || q.until.is_some() || !filters.is_empty() {
             // Graph insists that the $orderby property leads the $filter
-            let since = q.since.map(|d| d.format("%Y-%m-%dT%H:%M:%SZ").to_string());
-            let mut all = vec![format!("receivedDateTime ge {}", since.as_deref().unwrap_or("1900-01-01T00:00:00Z"))];
+            let stamp = |d: DateTime<Utc>| d.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+            let since = q.since.map(stamp).unwrap_or_else(|| "1900-01-01T00:00:00Z".into());
+            let mut all = vec![format!("receivedDateTime ge {since}")];
+            if let Some(until) = q.until {
+                all.push(format!("receivedDateTime lt {}", stamp(until)));
+            }
             all.extend(filters);
             url.push_str(&format!("&$filter={}", enc(&all.join(" and "))));
         }
