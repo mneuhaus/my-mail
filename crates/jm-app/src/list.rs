@@ -23,8 +23,8 @@ impl MailApp {
             Some(View::Flagged) => tr!("Flagged", "Markiert").to_string(),
             Some(View::Search { query, .. }) => format!("„{query}“"),
             Some(View::Folder { account, folder }) => {
-                let account = self.accounts.get(*account);
-                let name = account
+                self.accounts
+                    .get(*account)
                     .and_then(|a| a.folder(folder))
                     .map(|f| match f.well_known.as_deref() {
                         Some("inbox") => tr!("Inbox", "Posteingang").to_string(),
@@ -34,8 +34,7 @@ impl MailApp {
                         Some("deleteditems") => tr!("Trash", "Papierkorb").to_string(),
                         _ => f.display_name.clone(),
                     })
-                    .unwrap_or_else(|| tr!("Inbox", "Posteingang").to_string());
-                name
+                    .unwrap_or_else(|| tr!("Inbox", "Posteingang").to_string())
             }
             None => String::new(),
         }

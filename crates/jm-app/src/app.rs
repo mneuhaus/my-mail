@@ -310,7 +310,7 @@ impl MailApp {
                     }
                 }
                 if view == View::Flagged {
-                    rows.sort_by(|a, b| b.message.date().cmp(&a.message.date()));
+                    rows.sort_by_key(|r| std::cmp::Reverse(r.message.date()));
                 }
                 this.rows = rows;
                 this.next = next;
@@ -574,9 +574,9 @@ impl MailApp {
             ComposerEvent::Saved { account, message } => {
                 // keep the drafts list in step with what was just saved
                 if let Some(row) = self.rows.iter_mut().find(|r| r.message.id == message.id) {
-                    row.message = message.clone();
+                    row.message = (**message).clone();
                 } else if self.in_drafts() && self.current_account() == Some(*account) {
-                    self.rows.insert(0, Row { account: *account, message: message.clone() });
+                    self.rows.insert(0, Row { account: *account, message: (**message).clone() });
                 }
                 self.selected = Some(message.id.clone());
             }

@@ -24,7 +24,7 @@ use crate::{i18n, tr, util};
 const AUTOSAVE: Duration = Duration::from_secs(2);
 
 pub enum ComposerEvent {
-    Saved { account: usize, message: Message },
+    Saved { account: usize, message: Box<Message> },
     Sent { account: usize, id: String, recipients: String },
     Discarded { account: usize, id: Option<String> },
 }
@@ -279,7 +279,7 @@ impl Composer {
                         }
                         this.has_markers = html::author_html(message.body.as_ref().map_or("", |b| &b.content)).is_some();
                         this.draft = Some(message.clone());
-                        cx.emit(ComposerEvent::Saved { account: this.account, message });
+                        cx.emit(ComposerEvent::Saved { account: this.account, message: Box::new(message) });
                         jm_core::events::emit(&jm_core::events::Event::Changed {
                             account: this.mailbox.id().to_string(),
                             folder: Some("drafts".into()),
