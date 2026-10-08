@@ -164,8 +164,9 @@ impl MailApp {
             .id(("row", ix))
             .relative()
             .w_full()
-            // the same air on all four sides; every row has the same three lines, so the same height
-            .p(px(ROW_PAD))
+            // the same visible air on all four sides: the text line boxes add about 5 px above the first
+            // line and 1.5 px below the last, which the vertical padding gives back (measured)
+            .px(px(ROW_PAD)).pt(px(ROW_PAD - 5.)).pb(px(ROW_PAD - 1.5))
             .border_b_1()
             .border_color(theme.border.opacity(0.5))
             .cursor_pointer()
@@ -181,7 +182,7 @@ impl MailApp {
                 div()
                     .absolute()
                     .left(px((ROW_PAD - 7.) / 2.))
-                    .top(px(ROW_PAD + 6.5))
+                    .top(px(ROW_PAD - 5. + 7.5))
                     .size(px(7.))
                     .rounded_full()
                     .when(unread, |d| d.bg(if selected { fg } else { theme.primary })),
