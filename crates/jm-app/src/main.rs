@@ -12,6 +12,7 @@ mod list;
 mod reader;
 mod setup;
 mod sidebar;
+mod signature;
 mod theme;
 mod util;
 

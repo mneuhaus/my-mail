@@ -13,6 +13,7 @@ use std::process::Command;
 use serde_json::Value;
 
 use crate::config::Config;
+use crate::html;
 use crate::error::{Error, Result};
 
 const SQLITE: &str = "/usr/bin/sqlite3";
@@ -78,10 +79,19 @@ fn apply_bindings(config: &mut Config, signatures: &[SparkSignature]) -> Vec<Str
         let bound = signatures
             .iter()
             .find(|s| s.email.as_deref().is_some_and(|e| e.eq_ignore_ascii_case(account.email.trim())));
-        if let Some(signature) = bound
-            && account.signature_html != signature.html
-        {
+        let Some(signature) = bound else { continue };
+        // Spark only records the signature for new mails; the short one Marc uses for replies is
+        // the shortest unbound signature, when it really is shorter.
+        let length = |s: &SparkSignature| html::html_to_text(&s.html).chars().count();
+        let reply = signatures
+            .iter()
+            .filter(|s| s.email.is_none() && s.id != signature.id && length(s) < length(signature))
+            .min_by_key(|s| length(s))
+            .map(|s| s.html.clone())
+            .unwrap_or_default();
+        if account.signature_html != signature.html || account.signature_reply_html != reply {
             account.signature_html = signature.html.clone();
+            account.signature_reply_html = reply;
             changed.push(account.id.clone());
         }
     }
@@ -201,6 +211,7 @@ mod tests {
             name: String::new(),
             signature: "text fallback".into(),
             signature_html: String::new(),
+            signature_reply_html: String::new(),
             read_only: false,
         };
         let mut config = Config {
@@ -217,5 +228,31 @@ mod tests {
         assert_eq!(config.accounts[1].signature_html, "");
         // a second import changes nothing
         assert!(apply_bindings(&mut config, &signatures).is_empty());
+        // the longer unbound signature is no reply signature
+        assert_eq!(config.accounts[0].signature_reply_html, "");
+    }
+
+    #[test]
+    fn the_short_unbound_signature_answers() {
+        let mut config = Config {
+            accounts: vec![crate::AccountConfig {
+                id: "marc".into(),
+                email: "marc@roothirsch.com".into(),
+                name: String::new(),
+                signature: String::new(),
+                signature_html: String::new(),
+                signature_reply_html: String::new(),
+                read_only: false,
+            }],
+            ..Default::default()
+        };
+        let signatures = [
+            SparkSignature { email: Some("marc@roothirsch.com".into()), id: "LONG".into(), html: "<div>Grüße, Adresse, DSGVO</div>".into() },
+            SparkSignature { email: None, id: "SHORT".into(), html: "<div>Grüße, AGB</div>".into() },
+            SparkSignature { email: None, id: "SHORTEST".into(), html: "<div>Gr</div>".into() },
+        ];
+        assert_eq!(apply_bindings(&mut config, &signatures), ["marc"]);
+        assert_eq!(config.accounts[0].signature_html, "<div>Grüße, Adresse, DSGVO</div>");
+        assert_eq!(config.accounts[0].signature_reply_html, "<div>Gr</div>");
     }
 }

@@ -321,9 +321,11 @@ pub fn to_display_markdown(html: &str, remote_images: bool) -> String {
 /// Most tables in mail are layout scaffolding (newsletters nest them five deep). Shown as tables
 /// they squeeze whole paragraphs into one cell, so table markup is dropped: the paragraphs inside
 /// become siblings (and get paragraph spacing), and a cell that ends in bare text ends with a
-/// line break. Expects normalized HTML (ammonia output: lowercase tags, quoted attributes).
+/// line break. `<div>`s get the same treatment: Outlook and Spark write one `<div>` per line
+/// (`<div><br></div>` for an empty one), so a div is a line, not a paragraph. Expects normalized
+/// HTML (ammonia output: lowercase tags, quoted attributes).
 fn flatten_layout_tables(html: &str) -> String {
-    const DROP: [&str; 9] = ["table", "tbody", "thead", "tfoot", "tr", "td", "th", "center", "caption"];
+    const DROP: [&str; 10] = ["table", "tbody", "thead", "tfoot", "tr", "td", "th", "div", "center", "caption"];
     const BLOCK_ENDS: [&str; 12] =
         ["</p>", "</div>", "</ul>", "</ol>", "</li>", "</h1>", "</h2>", "</h3>", "</h4>", "</blockquote>", "<br>", "<hr>"];
     let mut out = String::with_capacity(html.len());
@@ -336,7 +338,7 @@ fn flatten_layout_tables(html: &str) -> String {
         let name: String = tail[name_start..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
         match tail.find('>') {
             Some(gt) if DROP.contains(&name.as_str()) => {
-                if closing && (name == "td" || name == "th") {
+                if closing && (name == "td" || name == "th" || name == "div") {
                     let end = out.trim_end();
                     if !end.is_empty() && !BLOCK_ENDS.iter().any(|b| end.ends_with(b)) {
                         out.push_str("<br>");
@@ -459,5 +461,12 @@ mod tests {
         assert_eq!(trailing, "weiter.\n\nDanke");
         let indented = to_display_markdown("<div>This is a test<br>\n  <br></div>", false);
         assert_eq!(indented, "This is a test");
+        // Outlook and Spark: a div per line, an empty div is an empty line
+        let lines = "<div>Grüße<br>Marc</div><div>Roothirsch GmbH</div><div>Brockhäger Str. 188</div>\
+                     <div><br></div><div>Neuer Absatz</div>";
+        assert_eq!(
+            to_display_markdown(lines, false),
+            "Grüße\\\nMarc\\\nRoothirsch GmbH\\\nBrockhäger Str. 188\n\nNeuer Absatz"
+        );
     }
 }

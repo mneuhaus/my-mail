@@ -406,10 +406,12 @@ impl Mailbox {
 
     // ---- drafts --------------------------------------------------------------------------
 
-    /// The account signature ready for a draft: its HTML with `data:` images turned into `cid:`
-    /// references, and the inline attachments those need. Empty without a signature.
-    fn signature_parts(&self, with_signature: bool) -> (String, Vec<html::InlineImage>) {
-        match self.account.signature_block().filter(|_| with_signature) {
+    /// The account signature ready for a draft (the short one for replies and forwards): its HTML
+    /// with `data:` images turned into `cid:` references, and the inline attachments those need.
+    /// Empty without a signature.
+    fn signature_parts(&self, with_signature: bool, answer: bool) -> (String, Vec<html::InlineImage>) {
+        let block = if answer { self.account.reply_signature_block() } else { self.account.signature_block() };
+        match block.filter(|_| with_signature) {
             Some(signature) => html::inline_data_images(&signature, "signature", &content_id_token()),
             None => (String::new(), Vec::new()),
         }
@@ -418,7 +420,7 @@ impl Mailbox {
     /// A new draft in Drafts. `input.body_html` is the author's part; the signature follows.
     pub fn create_draft(&self, input: &DraftInput, with_signature: bool, files: &[NewAttachment]) -> Result<Message> {
         self.guard_writable()?;
-        let (signature, images) = self.signature_parts(with_signature);
+        let (signature, images) = self.signature_parts(with_signature, false);
         let body = html::new_document(input.body_html.as_deref().unwrap_or(""), &signature);
         let mut msg = json!({
             "subject": input.subject.clone().unwrap_or_default(),
@@ -467,7 +469,7 @@ impl Mailbox {
             }
             let old = current.body.map(|b| b.content).unwrap_or_default();
             let new = html::replace_author_html(&old, body_html).unwrap_or_else(|| {
-                let (signature, signature_images) = self.signature_parts(true);
+                let (signature, signature_images) = self.signature_parts(true, false);
                 images = signature_images;
                 html::new_document(body_html, &signature)
             });
@@ -507,7 +509,7 @@ impl Mailbox {
     fn fill_answer(&self, draft_id: &str, body_html: &str, with_signature: bool, to: Option<&[Recipient]>) -> Result<Message> {
         let draft = self.message(draft_id)?;
         let quote = draft.body.map(|b| b.content).unwrap_or_default();
-        let (signature, images) = self.signature_parts(with_signature);
+        let (signature, images) = self.signature_parts(with_signature, true);
         let blocks = html::compose_blocks(body_html, &signature);
         let mut patch = json!({ "body": { "contentType": "HTML", "content": html::insert_at_top(&quote, &blocks) } });
         if let Some(to) = to {

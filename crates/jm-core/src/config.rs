@@ -34,6 +34,10 @@ pub struct AccountConfig {
     /// be `data:` URIs: drafts get them as inline attachments.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub signature_html: String,
+    /// Shorter HTML signature for replies and forwards (Spark: the unbound short one); falls
+    /// back to the main signature when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub signature_reply_html: String,
     /// Look, don't touch: no marking as read, flags, moves, deletes or drafts. For mailboxes
     /// another system processes (invoice@ is read by webIC).
     #[serde(default)]
@@ -41,8 +45,8 @@ pub struct AccountConfig {
 }
 
 impl AccountConfig {
-    /// The signature as HTML: the HTML signature, else the text one converted, `None` when the
-    /// account has neither.
+    /// The signature for new mails as HTML: the HTML signature, else the text one converted, `None`
+    /// when the account has neither.
     pub fn signature_block(&self) -> Option<String> {
         if !self.signature_html.trim().is_empty() {
             Some(self.signature_html.trim().to_string())
@@ -51,6 +55,12 @@ impl AccountConfig {
         } else {
             None
         }
+    }
+
+    /// The signature for replies and forwards: the short one if set, else the one for new mails.
+    pub fn reply_signature_block(&self) -> Option<String> {
+        let reply = self.signature_reply_html.trim();
+        if reply.is_empty() { self.signature_block() } else { Some(reply.to_string()) }
     }
 }
 

@@ -288,6 +288,9 @@ fn signature_json(a: &AccountConfig) -> Value {
         "type": kind,
         "first_line": first_line,
         "has_text_fallback": !a.signature.trim().is_empty(),
+        // replies and forwards: their own short signature, or the same one as new mails
+        "reply_type": if a.signature_reply_html.trim().is_empty() { "same" } else { "html" },
+        "reply_last_line": a.reply_signature_block().and_then(|b| html::html_to_text(&b).lines().map(str::trim).rfind(|l| !l.is_empty()).map(str::to_string)),
         "read_only": a.read_only,
     })
 }
@@ -825,6 +828,7 @@ mod tests {
             name: String::new(),
             signature: "\nMarc Neuhaus\nRoothirsch GmbH".into(),
             signature_html: String::new(),
+            signature_reply_html: String::new(),
             read_only: false,
         };
         let text = signature_json(&a);

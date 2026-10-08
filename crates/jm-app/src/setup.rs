@@ -6,13 +6,13 @@ use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use jm_core::auth::{self, DeviceCode, Ms365Login};
 use jm_core::Config;
 
+use crate::signature::Preview;
 use crate::sidebar::TOP_H;
 use crate::{i18n, tr};
 
@@ -32,6 +32,8 @@ enum Login {
 pub struct Setup {
     config: Config,
     signatures: Vec<(String, Entity<TextareaState>)>,
+    /// (account id, signature for new mails, signature for replies) of HTML signatures.
+    previews: Vec<(String, Preview, Option<Preview>)>,
     imports: Vec<Ms365Login>,
     /// Spark signatures bound to an address (offered for import).
     spark_signatures: usize,
@@ -46,6 +48,7 @@ impl Setup {
         let mut this = Self {
             config: Config::default(),
             signatures: Vec::new(),
+            previews: Vec::new(),
             imports: Vec::new(),
             spark_signatures: 0,
             login: Login::Idle,
@@ -74,7 +77,19 @@ impl Setup {
                 (a.id.clone(), state)
             })
             .collect();
-        self.spark_signatures = jm_core::spark::find_signatures().map(|s| s.iter().filter(|s| s.email.is_some()).count()).unwrap_or(0);
+        self.previews = self
+            .config
+            .accounts
+            .iter()
+            .filter(|a| !a.signature_html.trim().is_empty())
+            .map(|a| {
+                let reply = (!a.signature_reply_html.trim().is_empty())
+                    .then(|| Preview::new(format!("sig-reply-{}", a.id), &a.signature_reply_html));
+                (a.id.clone(), Preview::new(format!("sig-new-{}", a.id), &a.signature_html), reply)
+            })
+            .collect();
+        self.spark_signatures =
+            jm_core::spark::find_signatures().map(|s| s.iter().filter(|s| s.email.is_some()).count()).unwrap_or(0);
         let known: Vec<String> = self.config.accounts.iter().map(|a| a.email.to_lowercase()).collect();
         self.imports = auth::find_ms365_logins(self.config.client_id())
             .into_iter()
@@ -245,6 +260,7 @@ impl Setup {
         let result = Config::load().and_then(|mut config| {
             if let Some(a) = config.accounts.iter_mut().find(|a| a.id == id) {
                 a.signature_html.clear();
+                a.signature_reply_html.clear();
             }
             config.save()
         });
@@ -329,15 +345,23 @@ impl Render for Setup {
                                     .on_click(cx.listener(move |this, _, w, cx| this.remove(remove_id.clone(), w, cx))),
                             ),
                     )
-                    .when(!account.signature_html.trim().is_empty(), |d| {
+                    .when_some(self.previews.iter().find(|(id, _, _)| id == &account.id), |d, (_, new, reply)| {
                         let html_id = account.id.clone();
+                        let card = |title: &'static str, preview: &Preview| {
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_1p5()
+                                .child(div().text_xs().text_color(theme.muted_foreground).child(title))
+                                .child(div().p_3().rounded(px(8.)).bg(theme.muted).text_xs().child(preview.render()))
+                        };
                         d.child(
                             h_flex()
                                 .gap_2()
                                 .items_center()
                                 .child(div().flex_1().text_xs().text_color(theme.muted_foreground).child(tr!(
-                                    "Signature (HTML, from Spark)",
-                                    "Signatur (HTML, aus Spark)"
+                                    "Signatures (HTML, from Spark)",
+                                    "Signaturen (HTML, aus Spark)"
                                 )))
                                 .child(
                                     Button::new(("as-text", ix))
@@ -348,15 +372,22 @@ impl Render for Setup {
                                 ),
                         )
                         .child(
-                            div()
-                                .p_3()
-                                .rounded(px(8.))
-                                .bg(theme.muted)
-                                .text_xs()
-                                .child(TextView::markdown(
-                                    ElementId::Name(SharedString::from(format!("sig-{}", account.id))),
-                                    jm_core::html::to_display_markdown(&account.signature_html, false),
-                                )),
+                            h_flex()
+                                .gap_3()
+                                .items_start()
+                                .child(card(tr!("New mails", "Neue E-Mails"), new))
+                                .child(match reply {
+                                    Some(reply) => card(tr!("Replies & forwards", "Antworten & Weiterleitungen"), reply)
+                                        .into_any_element(),
+                                    None => v_flex()
+                                        .flex_1()
+                                        .gap_1p5()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(tr!("Replies & forwards", "Antworten & Weiterleitungen"))
+                                        .child(tr!("same as new mails", "wie bei neuen E-Mails"))
+                                        .into_any_element(),
+                                }),
                         )
                     })
                     .when_some(signature.filter(|_| account.signature_html.trim().is_empty()), |d, s| {

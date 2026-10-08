@@ -170,6 +170,9 @@ fn signatures(v: &Value) -> String {
         if s(&a["type"]) == "html" && yes(&a["has_text_fallback"]) {
             line.push_str("  (text fallback kept)");
         }
+        if s(&a["reply_type"]) == "html" {
+            line.push_str(&format!("  (replies: short, ends \"{}\")", truncate(s(&a["reply_last_line"]), 40)));
+        }
         if yes(&a["read_only"]) {
             line.push_str("  [read-only]");
         }

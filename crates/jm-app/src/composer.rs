@@ -474,8 +474,9 @@ impl Composer {
     }
 
     /// First lines of the signature as one line, for the hint under the text.
-    fn signature_line(&self) -> Option<String> {
-        let block = self.mailbox.account.signature_block()?;
+    fn signature_line(&self, cx: &App) -> Option<String> {
+        let account = &self.mailbox.account;
+        let block = if self.is_answer(cx) { account.reply_signature_block()? } else { account.signature_block()? };
         let text = html::html_to_text(&block);
         let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).take(3).collect();
         (!lines.is_empty()).then(|| lines.join("  ·  "))
@@ -653,7 +654,7 @@ impl Render for Composer {
                     .py_2()
                     .child(Textarea::new(&self.body).appearance(false).h_full()),
             )
-            .when_some(self.signature_line().filter(|_| self.has_markers), |d, line| {
+            .when_some(self.signature_line(cx).filter(|_| self.has_markers), |d, line| {
                 let quoted = self.is_answer(cx);
                 d.child(
                     v_flex()
