@@ -71,7 +71,7 @@ fn menus(cx: &mut App) {
             MenuItem::action(tr!("Reply All", "Allen antworten"), actions::ReplyAll),
             MenuItem::action(tr!("Forward", "Weiterleiten"), actions::Forward),
             MenuItem::separator(),
-            MenuItem::action(tr!("Pin / Unpin", "Anheften / Lösen"), actions::ToggleFlag),
+            MenuItem::action(tr!("Pin / Unpin", "Anheften / nicht mehr anheften"), actions::ToggleFlag),
             MenuItem::action(tr!("Mark Read / Unread", "Gelesen / Ungelesen"), actions::ToggleRead),
             MenuItem::action(tr!("Archive", "Archivieren"), actions::ArchiveMessage),
             MenuItem::action(tr!("Move to Trash", "In den Papierkorb"), actions::TrashMessage),

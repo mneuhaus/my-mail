@@ -291,7 +291,7 @@ impl MailApp {
             }
             menu = menu
                 .item(if pinned {
-                    item(tr!("Unpin", "Lösen"), IconName::PinOff, RowAction::Pin, writable)
+                    item(tr!("Unpin", "Nicht mehr anheften"), IconName::PinOff, RowAction::Pin, writable)
                 } else {
                     item(tr!("Pin", "Anheften"), IconName::Pin, RowAction::Pin, writable)
                 })

@@ -76,7 +76,7 @@ impl MailApp {
                     .disabled(read_only)
                     .selected(flagged)
                     .tooltip(if flagged {
-                        tr!("Unpin (S)", "Lösen (S)")
+                        tr!("Unpin (S)", "Nicht mehr anheften (S)")
                     } else {
                         tr!("Pin (S), also flags it in Outlook", "Anheften (S), in Outlook als Kennzeichnung")
                     })
