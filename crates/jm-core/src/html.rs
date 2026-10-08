@@ -204,7 +204,35 @@ pub fn sanitize_for_display(html: &str, remote_images: bool) -> String {
     if !remote_images {
         builder.rm_tags(["img"]);
     }
-    builder.clean(html).to_string()
+    flatten_layout_tables(&builder.clean(html).to_string())
+}
+
+/// Most tables in mail are layout scaffolding (newsletters nest them five deep). Shown as tables
+/// they squeeze whole paragraphs into one cell, so every table part becomes a plain block.
+/// Expects normalized HTML (ammonia output: lowercase tags, quoted attributes).
+fn flatten_layout_tables(html: &str) -> String {
+    const TAGS: [&str; 9] = ["table", "tbody", "thead", "tfoot", "tr", "td", "th", "center", "caption"];
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(lt) = rest.find('<') {
+        out.push_str(&rest[..lt]);
+        let tail = &rest[lt + 1..];
+        let closing = tail.starts_with('/');
+        let name_start = if closing { 1 } else { 0 };
+        let name: String = tail[name_start..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        match tail.find('>') {
+            Some(gt) if TAGS.contains(&name.as_str()) => {
+                out.push_str(if closing { "</div>" } else { "<div>" });
+                rest = &tail[gt + 1..];
+            }
+            _ => {
+                out.push('<');
+                rest = tail;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Whether the HTML references remote images (to offer a "load images" button).
@@ -260,5 +288,13 @@ mod tests {
         let clean = sanitize_for_display(html, false);
         assert!(!clean.contains("<img") && !clean.contains("script"));
         assert!(sanitize_for_display(html, true).contains("<img"));
+    }
+
+    #[test]
+    fn layout_tables_become_blocks() {
+        let html = "<table width=\"600\"><tr><td align=\"left\"><p>Hallo</p><p>Welt <b>fett</b></p></td></tr></table>";
+        let clean = sanitize_for_display(html, false);
+        assert!(!clean.contains("<table") && !clean.contains("<td"));
+        assert!(clean.contains("<p>Hallo</p><p>Welt <b>fett</b></p>"));
     }
 }

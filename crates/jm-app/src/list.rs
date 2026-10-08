@@ -1,0 +1,240 @@
+//! Middle column: search field and the message list.
+
+use std::ops::Range;
+
+use gpui_kit::assets::IconName;
+use gpui_kit::base::{h_flex, v_flex};
+use gpui_kit::component::button::ButtonVariants as _;
+use gpui_kit::component::input::Input;
+use gpui_kit::component::{ActiveTheme, Icon, Sizable};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
+
+use crate::actions;
+use crate::app::{MailApp, View};
+use crate::sidebar::TOP_H;
+use crate::{tr, util};
+
+pub const LIST_W: f32 = 380.;
+const ROW_H: f32 = 78.;
+
+impl MailApp {
+    fn view_title(&self) -> String {
+        match &self.view {
+            Some(View::Flagged) => tr!("Flagged", "Markiert").to_string(),
+            Some(View::Search { query, .. }) => format!("„{query}“"),
+            Some(View::Folder { account, folder }) => {
+                let account = self.accounts.get(*account);
+                let name = account
+                    .and_then(|a| a.folder(folder))
+                    .map(|f| match f.well_known.as_deref() {
+                        Some("inbox") => tr!("Inbox", "Posteingang").to_string(),
+                        Some("drafts") => tr!("Drafts", "Entwürfe").to_string(),
+                        Some("sentitems") => tr!("Sent", "Gesendet").to_string(),
+                        Some("archive") => tr!("Archive", "Archiv").to_string(),
+                        Some("deleteditems") => tr!("Trash", "Papierkorb").to_string(),
+                        _ => f.display_name.clone(),
+                    })
+                    .unwrap_or_else(|| tr!("Inbox", "Posteingang").to_string());
+                name
+            }
+            None => String::new(),
+        }
+    }
+
+    fn view_subtitle(&self) -> Option<String> {
+        match &self.view {
+            Some(View::Folder { account, .. } | View::Search { account, .. }) => {
+                self.accounts.get(*account).map(|a| a.config.email.clone())
+            }
+            Some(View::Flagged) => Some(tr!("all accounts", "alle Konten").to_string()),
+            None => None,
+        }
+    }
+
+    pub fn render_list(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.theme().clone();
+        let count = self.rows.len();
+        let empty = count == 0 && !self.loading;
+        let header = h_flex()
+            .h(px(TOP_H))
+            .flex_none()
+            .px_4()
+            .gap_2()
+            .items_center()
+            .window_control_area(WindowControlArea::Drag)
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).truncate().child(self.view_title()))
+                    .when_some(self.view_subtitle(), |d, s| {
+                        d.child(div().text_xs().text_color(theme.muted_foreground).truncate().child(s))
+                    }),
+            )
+            .when(self.loading, |d| {
+                d.child(Icon::new(IconName::LoaderCircle).small().text_color(theme.muted_foreground))
+            })
+            .child(
+                gpui_kit::component::button::Button::new("compose")
+                    .icon(IconName::SquarePen)
+                    .ghost()
+                    .small()
+                    .tooltip(tr!("New message (⌘N)", "Neue E-Mail (⌘N)"))
+                    .on_click(cx.listener(|this, _, w, cx| this.new_message(w, cx))),
+            );
+
+        let list = uniform_list(
+            "messages",
+            count,
+            cx.processor(|this, range: Range<usize>, window, cx| {
+                if range.end + 5 >= this.rows.len() && !this.next.is_empty() && !this.loading_more {
+                    cx.defer_in(window, |this, window, cx| this.load_more(window, cx));
+                }
+                range.map(|ix| this.render_row(ix, cx)).collect::<Vec<_>>()
+            }),
+        )
+        .track_scroll(&self.list_scroll)
+        .flex_1()
+        .min_h_0();
+
+        v_flex()
+            .w(px(LIST_W))
+            .flex_none()
+            .h_full()
+            .border_r_1()
+            .border_color(theme.border)
+            .key_context(actions::LIST)
+            .track_focus(&self.list_focus)
+            .child(header)
+            .child(div().px_3().pb_2().flex_none().child(Input::new(&self.search).small().cleanable(true).prefix(
+                Icon::new(IconName::Search).small().text_color(theme.muted_foreground),
+            )))
+            .child(div().h(px(1.)).flex_none().bg(theme.border))
+            .when_some(self.list_error.clone().filter(|_| count == 0), |d, e| {
+                d.child(div().p_4().text_sm().text_color(theme.danger).child(e))
+            })
+            .when(empty && self.list_error.is_none(), |d| {
+                d.child(
+                    div()
+                        .p_6()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(tr!("Nothing here.", "Hier ist nichts.")),
+                )
+            })
+            .child(list)
+    }
+
+    fn render_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let row = &self.rows[ix];
+        let m = &row.message;
+        let selected = self.selected.as_deref() == Some(m.id.as_str());
+        let unread = !m.is_read && !m.is_draft;
+        let who = if m.is_draft || self.is_sent_view() {
+            let to: Vec<String> = m.to_recipients.iter().map(|r| r.display().to_string()).collect();
+            if to.is_empty() { tr!("(no recipient)", "(kein Empfänger)").to_string() } else { to.join(", ") }
+        } else {
+            m.sender()
+        };
+        let account_tag = (self.view == Some(View::Flagged) && self.accounts.len() > 1)
+            .then(|| self.accounts.get(row.account).map(|a| a.config.id.clone()))
+            .flatten();
+        h_flex()
+            .id(("row", ix))
+            .h(px(ROW_H))
+            .w_full()
+            .px_3()
+            .gap_2()
+            .items_start()
+            .border_b_1()
+            .border_color(theme.border.opacity(0.6))
+            .cursor_pointer()
+            .when(selected, |d| d.bg(theme.list_active))
+            .when(!selected, |d| d.hover(|s| s.bg(theme.list_hover)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.focus_list(window, cx);
+                this.select_index(ix, window, cx);
+            }))
+            .child(
+                // unread dot
+                div().pt(px(15.)).w(px(8.)).flex_none().child(
+                    div().size(px(7.)).rounded_full().when(unread, |d| d.bg(theme.primary)),
+                ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .pt(px(9.))
+                    .gap(px(1.))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .when(unread, |d| d.font_weight(FontWeight::SEMIBOLD))
+                                    .when(m.is_draft, |d| d.text_color(theme.danger))
+                                    .child(if m.is_draft {
+                                        format!("{} {who}", tr!("Draft:", "Entwurf:"))
+                                    } else {
+                                        who
+                                    }),
+                            )
+                            .when(m.has_attachments, |d| {
+                                d.child(Icon::new(IconName::Paperclip).xsmall().text_color(theme.muted_foreground))
+                            })
+                            .when(m.is_flagged(), |d| d.child(Icon::new(IconName::Flag).xsmall().text_color(theme.danger)))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(util::list_date(m.date())),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    
+                                    .when(unread, |d| d.font_weight(FontWeight::MEDIUM))
+                                    .child(m.subject().to_string()),
+                            )
+                            .when_some(account_tag, |d, tag| {
+                                d.child(div().flex_none().text_xs().text_color(theme.muted_foreground).child(tag))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(util::ellipsize(&m.body_preview.replace(['\r', '\n'], " "), 160)),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn is_sent_view(&self) -> bool {
+        match &self.view {
+            Some(View::Folder { account, folder }) => {
+                folder == "sentitems"
+                    || self.accounts.get(*account).and_then(|a| a.folder(folder)).and_then(|f| f.well_known.as_deref())
+                        == Some("sentitems")
+            }
+            _ => false,
+        }
+    }
+}
