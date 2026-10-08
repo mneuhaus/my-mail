@@ -1,0 +1,26 @@
+[package]
+name = "jm-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Microsoft 365 mail over Microsoft Graph: accounts, auth, messages, drafts"
+
+[features]
+# Sending mail. Only the desktop app turns this on; the CLI and its MCP server are built
+# without it, so they cannot send even if someone edits their config.
+send = []
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+ureq = { version = "2.12", features = ["json"] }
+toml = "0.8"
+dirs = "6"
+base64 = "0.22"
+sha2 = "0.10"
+ammonia = "4"
+html2text = "0.14"
+html-escape = "0.2"
+url = "2"
