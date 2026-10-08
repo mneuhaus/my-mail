@@ -2,7 +2,7 @@
 //!
 //! Environment: `JUST_MAIL_HOME=<dir>` uses another config directory (tests, screenshots),
 //! `JUST_MAIL_THEME=light|dark` overrides the system appearance, `JUST_MAIL_LANG=en|de` the
-//! language.
+//! language, `JUST_MAIL_START=setup` opens the account settings (screenshots).
 
 mod actions;
 mod app;

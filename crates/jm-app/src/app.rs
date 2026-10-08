@@ -127,6 +127,9 @@ impl MailApp {
         };
         app.reload_accounts(window, cx);
         app.start_background_loops(window, cx);
+        if std::env::var("JUST_MAIL_START").as_deref() == Ok("setup") {
+            app.open_setup(window, cx);
+        }
         app
     }
 
