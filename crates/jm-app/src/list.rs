@@ -16,7 +16,8 @@ use crate::sidebar::TOP_H;
 use crate::{theme, tr, util};
 
 pub const LIST_W: f32 = 380.;
-const ROW_H: f32 = 78.;
+/// Padding around a row, the same on every side.
+const ROW_PAD: f32 = 16.;
 
 impl MailApp {
     fn view_title(&self) -> String {
@@ -161,12 +162,10 @@ impl MailApp {
         let menu = self.row_menu(ix, cx);
         h_flex()
             .id(("row", ix))
-            .h(px(ROW_H))
+            .relative()
             .w_full()
-            .px_3()
-            .gap_2()
-            // the three lines sit in the middle, the same air above and below
-            .items_center()
+            // the same air on all four sides; every row has the same three lines, so the same height
+            .p(px(ROW_PAD))
             .border_b_1()
             .border_color(theme.border.opacity(0.5))
             .cursor_pointer()
@@ -178,82 +177,79 @@ impl MailApp {
                 this.select_index(ix, window, cx);
             }))
             .child(
-                h_flex()
+                // unread dot in the left margin, centred on the first line (as in Spark)
+                div()
+                    .absolute()
+                    .left(px((ROW_PAD - 7.) / 2.))
+                    .top(px(ROW_PAD + 6.5))
+                    .size(px(7.))
+                    .rounded_full()
+                    .when(unread, |d| d.bg(if selected { fg } else { theme.primary })),
+            )
+            .child(
+                v_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap_2()
-                    .items_start()
+                    .gap(px(1.))
                     .child(
-                        // unread dot, centred on the first line
-                        div().mt(px(6.)).size(px(8.)).flex_none().rounded_full().when(unread, |d| {
-                            d.bg(if selected { fg } else { theme.primary })
-                        }),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap(px(1.))
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .items_center()
-                                    .when(m.is_draft, |d| {
-                                        d.child(div().flex_none().text_sm().text_color(if selected { fg } else { x.drafts }).child(
-                                            tr!("Draft", "Entwurf"),
-                                        ))
-                                    })
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_sm()
-                                            .when(unread, |d| d.font_weight(FontWeight::BOLD))
-                                            .when(!unread, |d| d.font_weight(FontWeight::MEDIUM))
-                                            .child(who),
-                                    )
-                                    .when(m.has_attachments, |d| {
-                                        d.child(Icon::new(IconName::Paperclip).xsmall().text_color(muted))
-                                    })
-                                    .when(m.is_flagged(), |d| {
-                                        d.child(Icon::new(IconName::Pin).xsmall().text_color(if selected { fg } else { x.flagged }))
-                                    })
-                                    .child(div().flex_none().text_xs().text_color(date_color).child(util::list_date(m.date()))),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap_1p5()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_sm()
-                                            .when(unread, |d| d.font_weight(FontWeight::MEDIUM))
-                                            .child(m.subject().to_string()),
-                                    )
-                                    .when_some(account_tag, |d, (tag, color)| {
-                                        d.child(
-                                            h_flex()
-                                                .flex_none()
-                                                .gap_1()
-                                                .items_center()
-                                                .text_xs()
-                                                .text_color(muted)
-                                                .child(div().size(px(6.)).rounded_full().bg(color))
-                                                .child(tag),
-                                        )
-                                    }),
-                            )
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .when(m.is_draft, |d| {
+                                d.child(div().flex_none().text_sm().text_color(if selected { fg } else { x.drafts }).child(
+                                    tr!("Draft", "Entwurf"),
+                                ))
+                            })
                             .child(
                                 div()
+                                    .flex_1()
+                                    .min_w_0()
                                     .truncate()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .child(util::ellipsize(&m.body_preview.replace(['\r', '\n'], " "), 160)),
-                            ),
+                                    .text_sm()
+                                    .when(unread, |d| d.font_weight(FontWeight::BOLD))
+                                    .when(!unread, |d| d.font_weight(FontWeight::MEDIUM))
+                                    .child(who),
+                            )
+                            .when(m.has_attachments, |d| {
+                                d.child(Icon::new(IconName::Paperclip).xsmall().text_color(muted))
+                            })
+                            .when(m.is_flagged(), |d| {
+                                d.child(Icon::new(IconName::Pin).xsmall().text_color(if selected { fg } else { x.flagged }))
+                            })
+                            .child(div().flex_none().text_xs().text_color(date_color).child(util::list_date(m.date()))),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .when(unread, |d| d.font_weight(FontWeight::MEDIUM))
+                                    .child(m.subject().to_string()),
+                            )
+                            .when_some(account_tag, |d, (tag, color)| {
+                                d.child(
+                                    h_flex()
+                                        .flex_none()
+                                        .gap_1()
+                                        .items_center()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(div().size(px(6.)).rounded_full().bg(color))
+                                        .child(tag),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(util::ellipsize(&m.body_preview.replace(['\r', '\n'], " "), 160)),
                     ),
             )
             .context_menu(menu)
