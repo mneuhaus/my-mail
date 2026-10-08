@@ -5,12 +5,13 @@ use std::ops::Range;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::input::Input;
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::actions;
-use crate::app::{MailApp, View};
+use crate::app::{MailApp, RowAction, View};
 use crate::sidebar::TOP_H;
 use crate::{theme, tr, util};
 
@@ -20,7 +21,7 @@ const ROW_H: f32 = 78.;
 impl MailApp {
     fn view_title(&self) -> String {
         match &self.view {
-            Some(View::Flagged) => tr!("Flagged", "Markiert").to_string(),
+            Some(View::Pinned) => tr!("Pinned", "Angeheftet").to_string(),
             Some(View::Search { query, .. }) => format!("„{query}“"),
             Some(View::Folder { account, folder }) => {
                 self.accounts
@@ -45,7 +46,7 @@ impl MailApp {
             Some(View::Folder { account, .. } | View::Search { account, .. }) => {
                 self.accounts.get(*account).map(|a| a.config.email.clone())
             }
-            Some(View::Flagged) => Some(tr!("all accounts", "alle Konten").to_string()),
+            Some(View::Pinned) => Some(tr!("all accounts", "alle Konten").to_string()),
             None => None,
         }
     }
@@ -152,18 +153,20 @@ impl MailApp {
         } else {
             m.sender()
         };
-        let account_tag = (self.view == Some(View::Flagged) && self.accounts.len() > 1)
+        let account_tag = (self.view == Some(View::Pinned) && self.accounts.len() > 1)
             .then(|| self.accounts.get(row.account).map(|a| (a.config.id.clone(), theme::account_color(row.account))))
             .flatten();
         let (fg, muted) = if selected { (x.on_selected, x.on_selected_muted) } else { (theme.foreground, theme.muted_foreground) };
         let date_color = if unread && !selected { theme.primary } else { muted };
+        let menu = self.row_menu(ix, cx);
         h_flex()
             .id(("row", ix))
             .h(px(ROW_H))
             .w_full()
             .px_3()
             .gap_2()
-            .items_start()
+            // the three lines sit in the middle, the same air above and below
+            .items_center()
             .border_b_1()
             .border_color(theme.border.opacity(0.5))
             .cursor_pointer()
@@ -175,78 +178,139 @@ impl MailApp {
                 this.select_index(ix, window, cx);
             }))
             .child(
-                // unread dot
-                div().pt(px(15.)).w(px(8.)).flex_none().child(
-                    div().size(px(8.)).rounded_full().when(unread, |d| d.bg(if selected { fg } else { theme.primary })),
-                ),
-            )
-            .child(
-                v_flex()
+                h_flex()
                     .flex_1()
                     .min_w_0()
-                    .pt(px(9.))
-                    .gap(px(1.))
+                    .gap_2()
+                    .items_start()
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .when(m.is_draft, |d| {
-                                d.child(div().flex_none().text_sm().text_color(if selected { fg } else { x.drafts }).child(tr!(
-                                    "Draft",
-                                    "Entwurf"
-                                )))
-                            })
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_sm()
-                                    .when(unread, |d| d.font_weight(FontWeight::BOLD))
-                                    .when(!unread, |d| d.font_weight(FontWeight::MEDIUM))
-                                    .child(who),
-                            )
-                            .when(m.has_attachments, |d| d.child(Icon::new(IconName::Paperclip).xsmall().text_color(muted)))
-                            .when(m.is_flagged(), |d| {
-                                d.child(Icon::new(IconName::Flag).xsmall().text_color(if selected { fg } else { x.flagged }))
-                            })
-                            .child(div().flex_none().text_xs().text_color(date_color).child(util::list_date(m.date()))),
+                        // unread dot, centred on the first line
+                        div().mt(px(6.)).size(px(8.)).flex_none().rounded_full().when(unread, |d| {
+                            d.bg(if selected { fg } else { theme.primary })
+                        }),
                     )
                     .child(
-                        h_flex()
-                            .gap_1p5()
-                            .items_center()
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(1.))
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .when(m.is_draft, |d| {
+                                        d.child(div().flex_none().text_sm().text_color(if selected { fg } else { x.drafts }).child(
+                                            tr!("Draft", "Entwurf"),
+                                        ))
+                                    })
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_sm()
+                                            .when(unread, |d| d.font_weight(FontWeight::BOLD))
+                                            .when(!unread, |d| d.font_weight(FontWeight::MEDIUM))
+                                            .child(who),
+                                    )
+                                    .when(m.has_attachments, |d| {
+                                        d.child(Icon::new(IconName::Paperclip).xsmall().text_color(muted))
+                                    })
+                                    .when(m.is_flagged(), |d| {
+                                        d.child(Icon::new(IconName::Pin).xsmall().text_color(if selected { fg } else { x.flagged }))
+                                    })
+                                    .child(div().flex_none().text_xs().text_color(date_color).child(util::list_date(m.date()))),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_1p5()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_sm()
+                                            .when(unread, |d| d.font_weight(FontWeight::MEDIUM))
+                                            .child(m.subject().to_string()),
+                                    )
+                                    .when_some(account_tag, |d, (tag, color)| {
+                                        d.child(
+                                            h_flex()
+                                                .flex_none()
+                                                .gap_1()
+                                                .items_center()
+                                                .text_xs()
+                                                .text_color(muted)
+                                                .child(div().size(px(6.)).rounded_full().bg(color))
+                                                .child(tag),
+                                        )
+                                    }),
+                            )
                             .child(
                                 div()
-                                    .flex_1()
-                                    .min_w_0()
                                     .truncate()
-                                    .text_sm()
-                                    .when(unread, |d| d.font_weight(FontWeight::MEDIUM))
-                                    .child(m.subject().to_string()),
-                            )
-                            .when_some(account_tag, |d, (tag, color)| {
-                                d.child(
-                                    h_flex()
-                                        .flex_none()
-                                        .gap_1()
-                                        .items_center()
-                                        .text_xs()
-                                        .text_color(muted)
-                                        .child(div().size(px(6.)).rounded_full().bg(color))
-                                        .child(tag),
-                                )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .truncate()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(util::ellipsize(&m.body_preview.replace(['\r', '\n'], " "), 160)),
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(util::ellipsize(&m.body_preview.replace(['\r', '\n'], " "), 160)),
+                            ),
                     ),
             )
+            .context_menu(menu)
             .into_any_element()
+    }
+
+    /// The right-click menu of a row: its actions apply to that row, whatever is selected.
+    fn row_menu(
+        &self,
+        ix: usize,
+        cx: &Context<Self>,
+    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        let row = &self.rows[ix];
+        let id = row.message.id.clone();
+        let draft = row.message.is_draft;
+        let pinned = row.message.is_flagged();
+        let read = row.message.is_read;
+        let read_only = self.accounts.get(row.account).is_none_or(|a| a.config.read_only);
+        let app = cx.entity().downgrade();
+        move |menu, _, _| {
+            let item = |label: &'static str, icon: IconName, action: RowAction, enabled: bool| {
+                let (app, id) = (app.clone(), id.clone());
+                PopupMenuItem::new(label).icon(icon).disabled(!enabled).on_click(move |_, window, cx| {
+                    let _ = app.update(cx, |this, cx| this.row_action(id.clone(), action, window, cx));
+                })
+            };
+            let writable = !read_only;
+            let mut menu = menu;
+            if !draft {
+                menu = menu
+                    .item(item(tr!("Reply", "Antworten"), IconName::Reply, RowAction::Reply, writable))
+                    .item(item(tr!("Reply all", "Allen antworten"), IconName::ReplyAll, RowAction::ReplyAll, writable))
+                    .item(item(tr!("Forward", "Weiterleiten"), IconName::Forward, RowAction::Forward, writable))
+                    .separator();
+            }
+            menu = menu
+                .item(if pinned {
+                    item(tr!("Unpin", "Lösen"), IconName::PinOff, RowAction::Pin, writable)
+                } else {
+                    item(tr!("Pin", "Anheften"), IconName::Pin, RowAction::Pin, writable)
+                })
+                .when(!draft, |m| {
+                    m.item(if read {
+                        item(tr!("Mark as unread", "Als ungelesen markieren"), IconName::Mail, RowAction::Read, writable)
+                    } else {
+                        item(tr!("Mark as read", "Als gelesen markieren"), IconName::MailOpen, RowAction::Read, writable)
+                    })
+                })
+                .separator();
+            menu = if draft {
+                menu.item(item(tr!("Discard draft", "Entwurf verwerfen"), IconName::Trash, RowAction::Trash, writable))
+            } else {
+                menu.item(item(tr!("Archive", "Archivieren"), IconName::Archive, RowAction::Archive, writable))
+                    .item(item(tr!("Delete", "Löschen"), IconName::Trash, RowAction::Trash, writable))
+            };
+            menu.separator().item(item(tr!("Copy id for jm", "ID für jm kopieren"), IconName::Copy, RowAction::CopyId, true))
+        }
     }
 
     fn is_sent_view(&self) -> bool {

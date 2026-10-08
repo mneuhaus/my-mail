@@ -24,7 +24,7 @@ use gpui_kit::*;
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
-        Mail, MailOpen, Send, Archive, Trash, Flag, FlagOff, Reply, ReplyAll, Forward, Paperclip, SquarePen, Pencil, Lock,
+        Mail, MailOpen, Send, Archive, Trash, Pin, PinOff, Reply, ReplyAll, Forward, Paperclip, SquarePen, Pencil, Lock,
         Image, Download, FolderInput, CircleCheckBig, Save, ListTodo, LogIn, KeyRound
     ]
 );
@@ -71,7 +71,7 @@ fn menus(cx: &mut App) {
             MenuItem::action(tr!("Reply All", "Allen antworten"), actions::ReplyAll),
             MenuItem::action(tr!("Forward", "Weiterleiten"), actions::Forward),
             MenuItem::separator(),
-            MenuItem::action(tr!("Flag / Unflag", "Markieren / Markierung entfernen"), actions::ToggleFlag),
+            MenuItem::action(tr!("Pin / Unpin", "Anheften / Lösen"), actions::ToggleFlag),
             MenuItem::action(tr!("Mark Read / Unread", "Gelesen / Ungelesen"), actions::ToggleRead),
             MenuItem::action(tr!("Archive", "Archivieren"), actions::ArchiveMessage),
             MenuItem::action(tr!("Move to Trash", "In den Papierkorb"), actions::TrashMessage),

@@ -4,6 +4,7 @@
 //! All Graph work runs on background threads through [`MailApp::run`]; results come back to
 //! the UI thread. Changes are applied optimistically and rolled back when Graph refuses.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -43,9 +44,22 @@ impl Account {
 pub enum View {
     /// `folder` is a folder id or a well-known name.
     Folder { account: usize, folder: String },
-    /// Flagged mail of all accounts.
-    Flagged,
+    /// Pinned mail of all accounts (the Outlook follow-up flag; Spark calls it pinning).
+    Pinned,
     Search { account: usize, query: String },
+}
+
+/// What the right-click menu of a row can do.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RowAction {
+    Reply,
+    ReplyAll,
+    Forward,
+    Pin,
+    Read,
+    Archive,
+    Trash,
+    CopyId,
 }
 
 pub struct Row {
@@ -88,6 +102,8 @@ pub struct MailApp {
     pub list_focus: FocusHandle,
     /// Bumped on every list load so late answers for an old view are dropped.
     generation: u64,
+    /// Row a context menu action applies to (instead of the selection).
+    menu_target: Option<String>,
     last_folder_refresh: Instant,
     _subscriptions: Vec<Subscription>,
 }
@@ -122,6 +138,7 @@ impl MailApp {
             list_scroll: UniformListScrollHandle::new(),
             list_focus: cx.focus_handle(),
             generation: 0,
+            menu_target: None,
             last_folder_refresh: Instant::now(),
             _subscriptions: subscriptions,
         };
@@ -196,7 +213,7 @@ impl MailApp {
         }
         let view_valid = match &self.view {
             Some(View::Folder { account, .. } | View::Search { account, .. }) => *account < self.accounts.len(),
-            Some(View::Flagged) => true,
+            Some(View::Pinned) => true,
             None => false,
         };
         if !view_valid {
@@ -263,9 +280,10 @@ impl MailApp {
             View::Folder { account, .. } | View::Search { account, .. } => {
                 self.accounts.get(*account).map(|a| vec![(*account, a.mailbox.clone())]).unwrap_or_default()
             }
-            View::Flagged => self.accounts.iter().enumerate().map(|(i, a)| (i, a.mailbox.clone())).collect(),
+            View::Pinned => self.accounts.iter().enumerate().map(|(i, a)| (i, a.mailbox.clone())).collect(),
         };
         let work_view = view.clone();
+        let pinned_first = self.in_folder("inbox");
         self.run(
             window,
             cx,
@@ -274,9 +292,23 @@ impl MailApp {
                 for (ix, mailbox) in jobs {
                     let page = match &work_view {
                         View::Folder { folder, .. } => {
-                            mailbox.list(&ListQuery { folder: Some(folder.clone()), top: PAGE, ..Default::default() })
+                            let page =
+                                mailbox.list(&ListQuery { folder: Some(folder.clone()), top: PAGE, ..Default::default() });
+                            // like Spark: pinned mail of the inbox on top, then everything else by date
+                            match page {
+                                Ok(mut page) if pinned_first => {
+                                    let query = ListQuery { folder: Some(folder.clone()), top: 25, flagged: true, ..Default::default() };
+                                    if let Ok(pinned) = mailbox.list(&query) {
+                                        let ids: HashSet<&str> = pinned.messages.iter().map(|m| m.id.as_str()).collect();
+                                        page.messages.retain(|m| !ids.contains(m.id.as_str()));
+                                        page.messages.splice(0..0, pinned.messages);
+                                    }
+                                    Ok(page)
+                                }
+                                other => other,
+                            }
                         }
-                        View::Flagged => {
+                        View::Pinned => {
                             mailbox.list(&ListQuery { folder: None, top: 100, flagged: true, ..Default::default() })
                         }
                         View::Search { query, .. } => mailbox
@@ -309,7 +341,7 @@ impl MailApp {
                         Err(e) => error = Some(e),
                     }
                 }
-                if view == View::Flagged {
+                if view == View::Pinned {
                     rows.sort_by_key(|r| std::cmp::Reverse(r.message.date()));
                 }
                 this.rows = rows;
@@ -397,11 +429,16 @@ impl MailApp {
 
     /// Whether the current view lists drafts.
     pub fn in_drafts(&self) -> bool {
+        self.in_folder("drafts")
+    }
+
+    /// Whether the current view is the well-known folder `name` (`inbox`, `drafts`, …).
+    pub fn in_folder(&self, name: &str) -> bool {
         match &self.view {
             Some(View::Folder { account, folder }) => {
-                folder == "drafts"
+                folder == name
                     || self.accounts.get(*account).and_then(|a| a.folder(folder)).and_then(|f| f.well_known.as_deref())
-                        == Some("drafts")
+                        == Some(name)
             }
             _ => false,
         }
@@ -453,7 +490,7 @@ impl MailApp {
                 Event::Changed { account, .. } => {
                     let ix = self.accounts.iter().position(|a| a.config.id == account);
                     let affects = match (&self.view, ix) {
-                        (Some(View::Flagged), Some(_)) => true,
+                        (Some(View::Pinned), Some(_)) => true,
                         (Some(View::Folder { account, .. } | View::Search { account, .. }), Some(ix)) => *account == ix,
                         _ => false,
                     };
@@ -612,8 +649,12 @@ impl MailApp {
 
     // MARK: message actions
 
-    /// The message the actions apply to: the open one, else the selected row.
+    /// The message the actions apply to: the row of a context menu, else the open one, else the
+    /// selected row.
     fn target(&self) -> Option<(usize, Message)> {
+        if let Some(id) = &self.menu_target {
+            return self.rows.iter().find(|r| &r.message.id == id).map(|r| (r.account, r.message.clone()));
+        }
         if let Pane::Reader(opened) = &self.pane {
             return Some((opened.account, opened.message.clone()));
         }
@@ -663,8 +704,10 @@ impl MailApp {
             if let Err(e) = result {
                 this.edit_message(&id, |m| m.flag.flag_status = before);
                 this.notify_error(tr!("Could not change the flag", "Markierung nicht geändert"), &e, window, cx);
-            } else if this.view == Some(View::Flagged) && after != FlagStatus::Flagged {
+            } else if this.view == Some(View::Pinned) && after != FlagStatus::Flagged {
                 this.drop_row(&id);
+            } else if this.in_folder("inbox") {
+                this.load_list(true, window, cx); // pinned mail moves to the top or back
             }
         });
         cx.notify();
@@ -709,11 +752,13 @@ impl MailApp {
         }
         let id = message.id.clone();
         let ix = self.row_index(&id);
+        // move on to the next mail only when the one filed away was the selected one
+        let was_selected = self.selected.as_deref() == Some(id.as_str());
         let removed = self.drop_row(&id);
-        if matches!(&self.pane, Pane::Reader(o) if o.message.id == id) || matches!(self.pane, Pane::Composer(_)) {
+        if was_selected && matches!(self.pane, Pane::Reader(_) | Pane::Composer(_)) {
             self.pane = Pane::Empty;
         }
-        if let Some(ix) = ix.filter(|_| !self.rows.is_empty()) {
+        if let Some(ix) = ix.filter(|_| was_selected && !self.rows.is_empty()) {
             self.select_index(ix.min(self.rows.len() - 1), window, cx);
         }
         let mailbox = self.accounts[account].mailbox.clone();
@@ -789,6 +834,22 @@ impl MailApp {
             },
         );
         cx.notify();
+    }
+
+    /// Run a context menu action on the row with `id` (not on the selection).
+    pub fn row_action(&mut self, id: String, action: RowAction, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_target = Some(id);
+        match action {
+            RowAction::Reply => self.answer(false, false, window, cx),
+            RowAction::ReplyAll => self.answer(true, false, window, cx),
+            RowAction::Forward => self.answer(false, true, window, cx),
+            RowAction::Pin => self.toggle_flag(window, cx),
+            RowAction::Read => self.toggle_read(window, cx),
+            RowAction::Archive => self.file_away(false, window, cx),
+            RowAction::Trash => self.file_away(true, window, cx),
+            RowAction::CopyId => self.copy_id(window, cx),
+        }
+        self.menu_target = None;
     }
 
     pub fn copy_id(&mut self, window: &mut Window, cx: &mut Context<Self>) {

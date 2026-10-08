@@ -64,21 +64,21 @@ impl MailApp {
         let x = theme::extra(cx);
         let mut list = v_flex().gap_0p5().px_2().pb_4();
 
-        let flagged_view = self.view == Some(View::Flagged);
+        let flagged_view = self.view == Some(View::Pinned);
         let flagged = self.rows.iter().filter(|r| r.message.is_flagged()).count();
         list = list.child(item(
             Item {
                 id: "flagged".into(),
-                icon: IconName::Flag,
+                icon: IconName::Pin,
                 color: x.flagged,
-                label: tr!("Flagged", "Markiert").into(),
+                label: tr!("Pinned", "Angeheftet").into(),
                 count: (flagged_view && flagged > 0).then_some(flagged as u32),
                 strong_count: false,
                 active: flagged_view,
                 depth: 0,
             },
             cx,
-            cx.listener(|this, _, w, cx| this.show(View::Flagged, w, cx)),
+            cx.listener(|this, _, w, cx| this.show(View::Pinned, w, cx)),
         ));
 
         for (ix, account) in self.accounts.iter().enumerate() {

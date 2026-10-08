@@ -70,15 +70,15 @@ impl MailApp {
             .child(div().w(px(1.)).h(px(18.)).mx_2().bg(theme.border))
             .child(
                 Button::new("flag")
-                    .icon(Icon::new(IconName::Flag).when(flagged, |i| i.text_color(theme.danger)))
+                    .icon(Icon::new(IconName::Pin).when(flagged, |i| i.text_color(crate::theme::extra(cx).flagged)))
                     .ghost()
                     .small()
                     .disabled(read_only)
                     .selected(flagged)
                     .tooltip(if flagged {
-                        tr!("Remove flag (S)", "Markierung entfernen (S)")
+                        tr!("Unpin (S)", "Lösen (S)")
                     } else {
-                        tr!("Flag for follow-up (S)", "Zur Nachverfolgung markieren (S)")
+                        tr!("Pin (S), also flags it in Outlook", "Anheften (S), in Outlook als Kennzeichnung")
                     })
                     .on_click(cx.listener(|this, _, w, cx| this.toggle_flag(w, cx))),
             )
