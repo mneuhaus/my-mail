@@ -98,13 +98,27 @@ impl MailApp {
                     .text_color(theme.muted_foreground)
                     .child(div().size(px(8.)).flex_none().rounded_full().bg(theme::account_color(ix)))
                     .child(div().flex_1().min_w_0().truncate().child(account.config.email.clone()))
+                    .when_some(account.folders_error.clone(), |d, err| {
+                        // a small sign, the message only on hover: it fixes itself on the next refresh
+                        let tip = if crate::i18n::german() {
+                            format!("Ordner konnten nicht aktualisiert werden, neuer Versuch folgt.\n{err}")
+                        } else {
+                            format!("Folders could not be refreshed, trying again soon.\n{err}")
+                        };
+                        d.child(
+                            div()
+                                .id(SharedString::from(format!("folders-error-{ix}")))
+                                .flex_none()
+                                .child(Icon::new(IconName::TriangleAlert).xsmall().text_color(theme.warning))
+                                .tooltip(move |w, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx)
+                                }),
+                        )
+                    })
                     .when(account.config.read_only, |d| {
                         d.child(Icon::new(IconName::Lock).xsmall().text_color(theme.muted_foreground))
                     }),
             );
-            if let Some(err) = &account.folders_error {
-                list = list.child(div().px_2().text_xs().text_color(theme.danger).child(err.clone()));
-            }
             let (main, rest): (Vec<&Folder>, Vec<&Folder>) =
                 account.folders.iter().partition(|f| f.well_known.is_some() && f.depth == 0);
             let folders: Vec<&Folder> = if account.show_all_folders { main.into_iter().chain(rest).collect() } else { main };

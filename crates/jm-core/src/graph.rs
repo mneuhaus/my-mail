@@ -48,7 +48,10 @@ fn transport_error(e: ureq::Error) -> Error {
     match e {
         ureq::Error::Status(status, resp) => graph_error(status, resp),
         ureq::Error::Transport(t) => {
-            Error::new(ErrorCode::Network, format!("Microsoft Graph is not reachable: {t}")).hint("check the network")
+            // ureq puts the whole request URL in front; the reason is what matters
+            let text = t.to_string();
+            let reason = if text.starts_with("http") { text.split_once(": ").map_or(text.as_str(), |(_, r)| r) } else { &text };
+            Error::new(ErrorCode::Network, format!("Microsoft Graph is not reachable: {reason}")).hint("check the network")
         }
     }
 }
@@ -159,10 +162,14 @@ impl Mailbox {
                     refreshed = true;
                     self.access_token(true)?;
                 }
-                Err(ureq::Error::Status(status @ (429 | 503 | 504), resp)) if attempts < 4 => {
+                Err(ureq::Error::Status(429 | 503 | 504, resp)) if attempts < 4 => {
                     let wait = resp.header("Retry-After").and_then(|v| v.parse::<u64>().ok()).unwrap_or(2 * attempts);
-                    let _ = status;
                     std::thread::sleep(Duration::from_secs(wait.min(30)));
+                }
+                // A dropped connection (Wi-Fi hiccup, "connection reset") is worth another try,
+                // but only for requests that cannot do anything twice.
+                Err(ureq::Error::Transport(_)) if method != "POST" && attempts < 3 => {
+                    std::thread::sleep(Duration::from_millis(700 * attempts));
                 }
                 Err(e) => return Err(transport_error(e)),
             }
