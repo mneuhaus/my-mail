@@ -57,8 +57,16 @@ pub fn size(bytes: u64) -> String {
     }
 }
 
+/// Fetches an attachment into ~/Downloads, to open it from there.
+pub fn save_attachment(mailbox: &jm_core::Mailbox, message_id: &str, attachment: &jm_core::Attachment) -> jm_core::Result<std::path::PathBuf> {
+    let bytes = mailbox.attachment_bytes(message_id, &attachment.id)?;
+    let path = download_path(&attachment.name);
+    std::fs::write(&path, bytes)?;
+    Ok(path)
+}
+
 /// A free path in ~/Downloads for `name` ("file (2).pdf" if taken).
-pub fn download_path(name: &str) -> std::path::PathBuf {
+fn download_path(name: &str) -> std::path::PathBuf {
     let dir = dirs_downloads();
     let clean: String = name.chars().map(|c| if c == '/' || c == ':' { '_' } else { c }).collect();
     let clean = if clean.trim().is_empty() { "attachment".to_string() } else { clean };

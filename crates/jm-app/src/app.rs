@@ -1005,12 +1005,7 @@ impl MailApp {
         self.run(
             window,
             cx,
-            move || {
-                let bytes = mailbox.attachment_bytes(&message_id, &attachment.id)?;
-                let path = crate::util::download_path(&attachment.name);
-                std::fs::write(&path, bytes)?;
-                Ok(path)
-            },
+            move || crate::util::save_attachment(&mailbox, &message_id, &attachment),
             |this, result, window, cx| match result {
                 Ok(path) => cx.open_with_system(&path),
                 Err(e) => this.notify_error(tr!("Download failed", "Download fehlgeschlagen"), &e, window, cx),

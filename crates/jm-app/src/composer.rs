@@ -1,6 +1,5 @@
 //! The draft editor. Every draft lives on the server (Drafts folder), so the CLI, Outlook and
-//! this window all see the same thing. Edits are saved two seconds after the last keystroke;
-//! sending always asks first.
+//! this window all see the same thing. Edits are saved two seconds after the last keystroke.
 //!
 //! The body field holds only the author's part: the signature and a reply's quote stay in the
 //! draft's HTML untouched (see `jm_core::html`).
@@ -466,6 +465,16 @@ impl Composer {
         });
     }
 
+    fn open_attachment(&mut self, attachment: Attachment, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(draft) = &self.draft else { return };
+        let mailbox = self.mailbox.clone();
+        let id = draft.id.clone();
+        self.run(window, cx, move || util::save_attachment(&mailbox, &id, &attachment), |this, result, _, cx| match result {
+            Ok(path) => cx.open_with_system(&path),
+            Err(e) => this.error = Some(e.to_string()),
+        });
+    }
+
     fn status(&self) -> String {
         if self.sending {
             tr!("Sending…", "Wird gesendet…").into()
@@ -565,10 +574,12 @@ impl Render for Composer {
             );
 
         let mut attachments = h_flex().px_5().py_2().gap_2().flex_wrap();
-        for a in &self.attachments {
+        for (i, a) in self.attachments.iter().enumerate() {
             let id = a.id.clone();
+            let att = a.clone();
             attachments = attachments.child(
                 h_flex()
+                    .id(("att", i))
                     .gap_1p5()
                     .pl_2p5()
                     .pr_1()
@@ -578,6 +589,8 @@ impl Render for Composer {
                     .border_color(theme.border)
                     .text_xs()
                     .items_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.secondary_hover))
                     .child(Icon::new(IconName::Paperclip).xsmall())
                     .child(a.name.clone())
                     .child(div().text_color(theme.muted_foreground).child(util::size(a.size)))
@@ -586,8 +599,14 @@ impl Render for Composer {
                             .icon(IconName::Close)
                             .ghost()
                             .xsmall()
+                            .tooltip(tr!("Remove", "Entfernen"))
                             .on_click(cx.listener(move |this, _, w, cx| this.remove_attachment(id.clone(), w, cx))),
-                    ),
+                    )
+                    .tooltip({
+                        let tip = tr!("Download and open", "Herunterladen und öffnen");
+                        move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(w, cx)
+                    })
+                    .on_click(cx.listener(move |this, _, w, cx| this.open_attachment(att.clone(), w, cx))),
             );
         }
 

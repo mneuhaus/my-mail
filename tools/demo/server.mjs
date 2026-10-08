@@ -20,6 +20,8 @@ const folder = (id, displayName, extra = {}) => ({
 });
 
 let nextId = 1;
+// an attachment as Graph keeps it after an upload (bytes still base64 in contentBytes)
+const uploaded = (a) => ({ ...a, id: `att-${nextId++}`, size: a.contentBytes ? Buffer.from(a.contentBytes, "base64").length : 0 });
 const message = (folderId, minutes, from, subject, html, extra = {}) => ({
   id: `msg-${nextId++}`,
   subject,
@@ -198,8 +200,10 @@ const server = http.createServer((req, res) => {
     if (parts[1] === "mailFolders" && parts[3] === "messages") return send(res, 200, list(box, url, parts[2]));
     if (path === "/me/messages" && req.method === "GET") return send(res, 200, list(box, url, null));
     if (path === "/me/messages" && req.method === "POST") {
+      const attachments = (body.attachments || []).map(uploaded);
       const draft = message("f-drafts", 0, me, body.subject || "", body.body?.content || "", {
         isDraft: true, from: null, toRecipients: body.toRecipients || [], ccRecipients: body.ccRecipients || [],
+        attachments, hasAttachments: attachments.some((x) => !x.isInline),
       });
       box.messages.push(draft);
       return send(res, 201, draft);
@@ -225,13 +229,20 @@ const server = http.createServer((req, res) => {
       const a = m.attachments.find((x) => x.id === parts[4]);
       if (!a) return send(res, 404, { error: { code: "ErrorItemNotFound", message: "not found" } });
       res.writeHead(200, { "content-type": a.contentType });
-      return res.end(a.bytes || `(demo content of ${a.name})`);
+      const bytes = a.bytes || (a.contentBytes && Buffer.from(a.contentBytes, "base64"));
+      return res.end(bytes || `(demo content of ${a.name})`);
     }
-    if (parts[3] === "attachments" && req.method === "GET") return send(res, 200, { value: m.attachments.map(({ bytes, ...a }) => a) });
+    if (parts[3] === "attachments" && req.method === "GET") return send(res, 200, { value: m.attachments.map(({ bytes, contentBytes, ...a }) => a) });
     if (parts[3] === "attachments" && req.method === "POST") {
-      const a = { ...body, id: `att-${Date.now()}`, size: body.contentBytes ? body.contentBytes.length : 0 };
+      const a = uploaded(body);
       m.attachments.push(a);
+      m.hasAttachments = m.attachments.some((x) => !x.isInline);
       return send(res, 201, a);
+    }
+    if (parts[3] === "attachments" && parts.length === 5 && req.method === "DELETE") {
+      m.attachments = m.attachments.filter((x) => x.id !== parts[4]);
+      m.hasAttachments = m.attachments.some((x) => !x.isInline);
+      return send(res, 204);
     }
     if (parts[3] === "move") {
       m.parentFolderId = folderId(box, body.destinationId);
