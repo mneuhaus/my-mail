@@ -192,7 +192,7 @@ impl MailApp {
         });
 
         let body_id = SharedString::from(format!("body-{}-{}", m.id, opened.images_loaded));
-        let body = TextView::html(ElementId::Name(body_id), opened.html.clone()).selectable(true);
+        let body = TextView::markdown(ElementId::Name(body_id), opened.html.clone()).selectable(true);
 
         v_flex()
             .size_full()

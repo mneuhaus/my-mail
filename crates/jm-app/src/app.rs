@@ -57,6 +57,7 @@ pub struct Opened {
     pub account: usize,
     pub message: Message,
     pub attachments: Vec<Attachment>,
+    /// The body as Markdown (see `jm_core::html::to_display_markdown`).
     pub html: SharedString,
     pub has_remote_images: bool,
     pub images_loaded: bool,
@@ -803,7 +804,7 @@ impl MailApp {
     pub fn load_images(&mut self, cx: &mut Context<Self>) {
         if let Pane::Reader(opened) = &mut self.pane {
             let html = opened.message.body.as_ref().map(|b| b.content.clone()).unwrap_or_default();
-            opened.html = jm_core::html::sanitize_for_display(&html, true).into();
+            opened.html = jm_core::html::to_display_markdown(&html, true).into();
             opened.images_loaded = true;
             cx.notify();
         }
@@ -837,7 +838,7 @@ fn reader_state(account: usize, message: Message, attachments: Vec<Attachment>, 
     let has_remote_images = jm_core::html::has_remote_images(&raw);
     Opened {
         account,
-        html: jm_core::html::sanitize_for_display(&raw, remote).into(),
+        html: jm_core::html::to_display_markdown(&raw, remote).into(),
         message,
         attachments,
         has_remote_images,

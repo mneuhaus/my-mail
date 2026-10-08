@@ -207,11 +207,45 @@ pub fn sanitize_for_display(html: &str, remote_images: bool) -> String {
     flatten_layout_tables(&builder.clean(html).to_string())
 }
 
+/// Mail HTML as Markdown for display: cleaned like [`sanitize_for_display`], then converted, so
+/// paragraphs, line breaks, lists, emphasis and links survive while layout noise goes.
+pub fn to_display_markdown(html: &str, remote_images: bool) -> String {
+    let clean = sanitize_for_display(html, remote_images);
+    let converter = htmd::HtmlToMarkdown::builder()
+        .options(htmd::options::Options { br_style: htmd::options::BrStyle::Backslash, ..Default::default() })
+        .build();
+    let md = converter.convert(&clean).unwrap_or_else(|_| html_to_text(&clean));
+    // a line holding only a hard break or nothing at all is spacing; keep at most one
+    let lines: Vec<&str> = md.lines().map(str::trim_end).collect();
+    let is_space = |l: &str| l.is_empty() || l == "\\";
+    let mut out = String::with_capacity(md.len());
+    let mut blank = 0;
+    for (i, line) in lines.iter().enumerate() {
+        if is_space(line) {
+            blank += 1;
+            if blank == 1 {
+                out.push('\n');
+            }
+            continue;
+        }
+        blank = 0;
+        // a hard break right before a paragraph end would show as a literal backslash
+        let ends_paragraph = lines.get(i + 1).is_none_or(|next| is_space(next));
+        let line = if ends_paragraph { line.trim_end_matches('\\').trim_end() } else { line };
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.trim().to_string()
+}
+
 /// Most tables in mail are layout scaffolding (newsletters nest them five deep). Shown as tables
-/// they squeeze whole paragraphs into one cell, so every table part becomes a plain block.
-/// Expects normalized HTML (ammonia output: lowercase tags, quoted attributes).
+/// they squeeze whole paragraphs into one cell, so table markup is dropped: the paragraphs inside
+/// become siblings (and get paragraph spacing), and a cell that ends in bare text ends with a
+/// line break. Expects normalized HTML (ammonia output: lowercase tags, quoted attributes).
 fn flatten_layout_tables(html: &str) -> String {
-    const TAGS: [&str; 9] = ["table", "tbody", "thead", "tfoot", "tr", "td", "th", "center", "caption"];
+    const DROP: [&str; 9] = ["table", "tbody", "thead", "tfoot", "tr", "td", "th", "center", "caption"];
+    const BLOCK_ENDS: [&str; 12] =
+        ["</p>", "</div>", "</ul>", "</ol>", "</li>", "</h1>", "</h2>", "</h3>", "</h4>", "</blockquote>", "<br>", "<hr>"];
     let mut out = String::with_capacity(html.len());
     let mut rest = html;
     while let Some(lt) = rest.find('<') {
@@ -221,8 +255,13 @@ fn flatten_layout_tables(html: &str) -> String {
         let name_start = if closing { 1 } else { 0 };
         let name: String = tail[name_start..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
         match tail.find('>') {
-            Some(gt) if TAGS.contains(&name.as_str()) => {
-                out.push_str(if closing { "</div>" } else { "<div>" });
+            Some(gt) if DROP.contains(&name.as_str()) => {
+                if closing && (name == "td" || name == "th") {
+                    let end = out.trim_end();
+                    if !end.is_empty() && !BLOCK_ENDS.iter().any(|b| end.ends_with(b)) {
+                        out.push_str("<br>");
+                    }
+                }
                 rest = &tail[gt + 1..];
             }
             _ => {
@@ -292,9 +331,23 @@ mod tests {
 
     #[test]
     fn layout_tables_become_blocks() {
-        let html = "<table width=\"600\"><tr><td align=\"left\"><p>Hallo</p><p>Welt <b>fett</b></p></td></tr></table>";
+        let html = "<table width=\"600\"><tr><td align=\"left\"><p>Hallo</p><p>Welt <b>fett</b></p></td></tr>\
+                    <tr><td>Zeile</td><td>Zelle</td></tr></table>";
         let clean = sanitize_for_display(html, false);
         assert!(!clean.contains("<table") && !clean.contains("<td"));
         assert!(clean.contains("<p>Hallo</p><p>Welt <b>fett</b></p>"));
+        assert!(clean.contains("Zeile<br>Zelle<br>"));
+        assert!(!clean.contains("</p><br>"));
+    }
+
+    #[test]
+    fn display_markdown_keeps_paragraphs_breaks_and_links() {
+        let html = "<table><tr><td><p>Hallo,</p><p>Text mit <a href=\"https://x.de\">Link</a> und <b>fett</b>.</p>\
+                    <p>Danke!<br>Anna<br>Support</p></td></tr></table>";
+        let md = to_display_markdown(html, false);
+        assert!(md.contains("Hallo,\n\nText mit [Link](https://x.de) und **fett**."), "{md}");
+        assert!(md.contains("Danke!\\\nAnna\\\nSupport"), "{md}");
+        let trailing = to_display_markdown("<p>weiter.<br></p><p>Danke</p>", false);
+        assert_eq!(trailing, "weiter.\n\nDanke");
     }
 }
