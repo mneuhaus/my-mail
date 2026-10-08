@@ -128,6 +128,8 @@ fn run_tool(name: &str, args: &Value) -> Result<Value> {
                 a.opt_str("from")?.as_deref(),
                 a.opt_str("subject")?.as_deref(),
                 a.flag("attachments")?,
+                ops::parse_when(a.opt_str("since")?.as_deref())?,
+                ops::parse_when(a.opt_str("until")?.as_deref())?,
             )?;
             ops::search(&ctx()?, &query, a.opt_str("folder")?.as_deref(), a.limit()?)
         }
@@ -314,6 +316,8 @@ pub fn tools() -> Vec<Value> {
                 "from": { "type": "string", "description": "Only from this address or name" },
                 "subject": { "type": "string", "description": "Only with these words in the subject" },
                 "attachments": { "type": "boolean", "description": "Only with attachments" },
+                "since": { "type": "string", "description": "Only newer than: 36h, 7d, 2w, today, yesterday, 2026-10-01 or an ISO time" },
+                "until": { "type": "string", "description": "Only older than (same forms as since)" },
                 "folder": folder,
                 "limit": limit
             }),

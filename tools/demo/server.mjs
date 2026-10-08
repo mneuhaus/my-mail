@@ -159,7 +159,7 @@ function list(box, url, folder) {
   if (filter.includes("hasAttachments eq true")) items = items.filter((m) => m.hasAttachments);
   const search = (url.searchParams.get("$search") || "").replace(/"/g, "").toLowerCase();
   if (search) {
-    const words = search.split(/\s+/).filter((w) => w && !w.includes(":"));
+    const words = search.split(/\s+/).filter((w) => w && !/[:<>]/.test(w) && w !== "and");
     items = items.filter((m) => words.every((w) => `${m.subject} ${m.bodyPreview} ${m.from?.emailAddress.name}`.toLowerCase().includes(w)));
   }
   const top = Number(url.searchParams.get("$top") || 25);

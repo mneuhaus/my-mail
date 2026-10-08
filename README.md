@@ -27,7 +27,7 @@ an MCP server) that share the same accounts. Mail goes through Microsoft Graph o
 
 ```
 jm list [--unread] [--flagged] [-f folder] [--since 2d]
-jm search "Rechnung"
+jm search "Rechnung" [--since 2w]
 jm show a1b2c3d4                       # 8-character short ids from listings
 jm drafts reply a1b2c3d4 --body "Passt so, danke!"
 jm drafts create --to max@example.com --subject "Angebot" --body-file mail.txt

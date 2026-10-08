@@ -79,7 +79,7 @@ enum Command {
     List(ListArgs),
 
     /// Full-text search over subject, body and people (whole mailbox unless -f)
-    #[command(after_help = "Examples:\n  jm search \"Angebot Fenster\"\n  jm search spark -f inbox -n 5\n  jm search Rechnung --from telekom.de --attachments\n  jm search --subject Lohnzettel -f inbox -n 80")]
+    #[command(after_help = "Examples:\n  jm search \"Angebot Fenster\"\n  jm search spark -f inbox -n 5\n  jm search Rechnung --from telekom.de --attachments\n  jm search Angebot --since 2w\n  jm search --subject Lohnzettel -f inbox -n 80")]
     Search {
         /// Words to look for (optional when a filter is given)
         query: Option<String>,
@@ -98,6 +98,12 @@ enum Command {
         /// Only with attachments
         #[arg(long, alias = "has-attachments")]
         attachments: bool,
+        /// Only newer than: 36h, 7d, 2w, today, yesterday, 2026-10-01 or an ISO time
+        #[arg(long, value_name = "WHEN")]
+        since: Option<String>,
+        /// Only older than (same forms as --since)
+        #[arg(long, value_name = "WHEN")]
+        until: Option<String>,
     },
 
     /// Show one message: headers, readable text, attachments
@@ -470,8 +476,9 @@ fn run(cli: Cli) -> Result<Outcome> {
             };
             (View::Messages, ops::list(&ctx()?, &params)?)
         }
-        Command::Search { query, folder, limit, from, subject, attachments } => {
-            let query = ops::search_query(query.as_deref(), from.as_deref(), subject.as_deref(), attachments)?;
+        Command::Search { query, folder, limit, from, subject, attachments, since, until } => {
+            let (since, until) = (ops::parse_when(since.as_deref())?, ops::parse_when(until.as_deref())?);
+            let query = ops::search_query(query.as_deref(), from.as_deref(), subject.as_deref(), attachments, since, until)?;
             (View::Messages, ops::search(&ctx()?, &query, folder.as_deref(), limit)?)
         }
         Command::Show { id, html, raw } => {

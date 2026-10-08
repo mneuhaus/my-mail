@@ -134,6 +134,11 @@ pub fn parse_since(input: &str, now: DateTime<Local>) -> Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(input.trim()).map(|t| t.with_timezone(&Utc)).map_err(|_| invalid())
 }
 
+/// An optional `--since` / `--until` value, read against the current time.
+pub fn parse_when(input: Option<&str>) -> Result<Option<DateTime<Utc>>> {
+    input.map(|s| parse_since(s, Local::now())).transpose()
+}
+
 fn local_midnight(date: NaiveDate) -> Option<DateTime<Utc>> {
     Local.from_local_datetime(&date.and_hms_opt(0, 0, 0)?).earliest().map(|t| t.with_timezone(&Utc))
 }
@@ -427,8 +432,8 @@ pub fn list(ctx: &Ctx, p: &ListParams) -> Result<Value> {
             if p.all && p.folder.is_some() {
                 return Err(Error::validation("pick either a folder or the whole mailbox (all), not both"));
             }
-            let since = p.since.as_deref().map(|s| parse_since(s, Local::now())).transpose()?;
-            let until = p.until.as_deref().map(|s| parse_since(s, Local::now())).transpose()?;
+            let since = parse_when(p.since.as_deref())?;
+            let until = parse_when(p.until.as_deref())?;
             let whole = p.all || (p.flagged && p.folder.is_none());
             let name = p.folder.clone().unwrap_or_else(|| "inbox".into());
             let folder = if whole { None } else { Some(mb.resolve_folder(&name)?) };
@@ -454,9 +459,16 @@ pub fn list(ctx: &Ctx, p: &ListParams) -> Result<Value> {
     }))
 }
 
-/// The search words plus filters as one Graph (KQL) query: `from:`, `subject:` and
-/// `hasattachments:true` restrict the search, so a filter alone is a valid search too.
-pub fn search_query(words: Option<&str>, from: Option<&str>, subject: Option<&str>, attachments: bool) -> Result<String> {
+/// The search words plus filters as one Graph (KQL) query: `from:`, `subject:`,
+/// `hasattachments:true` and `received` restrict the search, so a filter alone is a valid search too.
+pub fn search_query(
+    words: Option<&str>,
+    from: Option<&str>,
+    subject: Option<&str>,
+    attachments: bool,
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+) -> Result<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(from) = from.map(str::trim).filter(|f| !f.is_empty()) {
         parts.push(format!("from:{}", from.replace([' ', '"'], "")));
@@ -467,11 +479,18 @@ pub fn search_query(words: Option<&str>, from: Option<&str>, subject: Option<&st
     if attachments {
         parts.push("hasattachments:true".into());
     }
+    let stamp = |d: DateTime<Utc>| d.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let received: Vec<String> =
+        [since.map(|d| format!("received>={}", stamp(d))), until.map(|d| format!("received<{}", stamp(d)))].into_iter().flatten().collect();
+    if !received.is_empty() {
+        // KQL joins two restrictions on the same property with OR unless told otherwise
+        parts.push(received.join(" AND "));
+    }
     if let Some(words) = words.map(str::trim).filter(|w| !w.is_empty()) {
         parts.push(words.to_string());
     }
     if parts.is_empty() {
-        return Err(Error::validation("nothing to search for").hint("give words, --from, --subject or --attachments"));
+        return Err(Error::validation("nothing to search for").hint("give words, --from, --subject, --attachments or --since"));
     }
     Ok(parts.join(" "))
 }
@@ -787,11 +806,21 @@ mod tests {
     #[test]
     fn search_filters_become_kql() {
         assert_eq!(
-            search_query(Some("Rechnung"), Some("billing@telekom.de"), None, true).unwrap(),
+            search_query(Some("Rechnung"), Some("billing@telekom.de"), None, true, None, None).unwrap(),
             "from:billing@telekom.de hasattachments:true Rechnung"
         );
-        assert_eq!(search_query(None, None, Some("Lohnzettel Mai"), false).unwrap(), "subject:Lohnzettel subject:Mai");
-        assert!(search_query(Some("  "), None, None, false).is_err());
+        assert_eq!(search_query(None, None, Some("Lohnzettel Mai"), false, None, None).unwrap(), "subject:Lohnzettel subject:Mai");
+        assert!(search_query(Some("  "), None, None, false, None, None).is_err());
+    }
+
+    #[test]
+    fn search_time_span_becomes_received() {
+        let day = |d| Utc.with_ymd_and_hms(2026, 10, d, 6, 0, 0).unwrap();
+        assert_eq!(
+            search_query(Some("Angebot"), None, None, false, Some(day(1)), Some(day(2))).unwrap(),
+            "received>=2026-10-01T06:00:00Z AND received<2026-10-02T06:00:00Z Angebot"
+        );
+        assert_eq!(search_query(None, None, None, false, Some(day(1)), None).unwrap(), "received>=2026-10-01T06:00:00Z");
     }
 
     #[test]

@@ -54,9 +54,10 @@ fn yes(v: &Value) -> bool {
 
 /// At most `max` characters, `…` when cut (never splits a character).
 pub fn truncate(text: &str, max: usize) -> String {
-    let text = text.trim();
+    // one line, even for a subject that arrived folded over two
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if text.chars().count() <= max {
-        return text.to_string();
+        return text;
     }
     let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
     out.push('…');
@@ -371,6 +372,7 @@ mod tests {
         assert_eq!(truncate("Grüße aus Gütersloh", 7), "Grüße …");
         assert_eq!(truncate("kurz", 10), "kurz");
         assert_eq!(truncate("📎📎📎", 2), "📎…");
+        assert_eq!(truncate("Hotel\r\n TUER26", 20), "Hotel TUER26");
     }
 
     #[test]
