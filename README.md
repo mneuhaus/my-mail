@@ -6,7 +6,8 @@ an MCP server) that share the same accounts. Mail goes through Microsoft Graph o
 - **Several accounts**, each with its own folders and signature. Accounts can be **read-only**
   (no marking as read, flags, moves or drafts), for mailboxes another system processes.
 - **Read**: HTML mail is cleaned up for reading (no scripts, no tracking pixels: remote images only
-  on request).
+  on request). Below a mail comes what followed in its conversation, your own answers and drafts
+  included, each with only its new part (Graph's `uniqueBody`).
 - **Pin** mail you still have to deal with (Spark's pin, stored as the Outlook follow-up flag, so
   Outlook and phones see it too). Pinned mail sits on top of the inbox; *Pinned* lists it for all
   accounts. Right-click a mail for reply, pin, read/unread, archive, delete or discard (drafts).

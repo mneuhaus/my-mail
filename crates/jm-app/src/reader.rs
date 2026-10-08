@@ -1,4 +1,5 @@
-//! Right column when a received mail is open: toolbar, header, attachments, body.
+//! Right column when a received mail is open: toolbar, header, attachments, body, and below it
+//! what came after it in the conversation.
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
@@ -9,7 +10,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use jm_core::Recipient;
 
-use crate::app::{MailApp, Pane};
+use crate::app::{MailApp, Pane, ThreadMessage};
 use crate::sidebar::TOP_H;
 use crate::{tr, util};
 
@@ -192,8 +193,10 @@ impl MailApp {
         });
 
         let body_id = SharedString::from(format!("body-{}-{}", m.id, opened.images_loaded));
-        let card = crate::theme::extra(cx).card;
         let body = TextView::markdown(ElementId::Name(body_id), opened.html.clone()).selectable(true);
+        let later: Vec<_> = (opened.thread.iter().enumerate())
+            .map(|(i, t)| later_card(i, t, opened.account, opened.images_loaded, cx))
+            .collect();
 
         v_flex()
             .size_full()
@@ -206,21 +209,62 @@ impl MailApp {
                         .children(attachments)
                         .children(images_banner)
                         .child(
-                            div()
+                            v_flex()
                                 .mx_6()
                                 .mb_6()
-                                .px_6()
-                                .py_5()
-                                .rounded(px(10.))
-                                .border_1()
-                                .border_color(theme.border)
-                                .bg(card)
-                                .text_sm()
-                                .child(body),
+                                .gap_3()
+                                .child(card(cx).px_6().py_5().child(body))
+                                .children(later),
                         ),
                 ),
             )
     }
+}
+
+/// The rounded box a mail body sits in.
+fn card(cx: &App) -> Div {
+    let theme = cx.theme();
+    div().rounded(px(10.)).border_1().border_color(theme.border).bg(crate::theme::extra(cx).card).text_sm()
+}
+
+/// A later message of the conversation (an answer, maybe our own or a draft): who, when, and only
+/// what it adds to the mail above.
+fn later_card(i: usize, later: &ThreadMessage, account: usize, images: bool, cx: &mut Context<MailApp>) -> Div {
+    let theme = cx.theme().clone();
+    let m = &later.message;
+    let to = m.to_recipients.iter().chain(&m.cc_recipients).map(Recipient::display).collect::<Vec<_>>().join(", ");
+    let draft = m.is_draft.then(|| {
+        let id = m.id.clone();
+        Button::new(("edit-draft", i))
+            .label(tr!("Edit", "Bearbeiten"))
+            .icon(IconName::Pencil)
+            .xsmall()
+            .ghost()
+            .on_click(cx.listener(move |this, _, w, cx| this.open_draft(account, id.clone(), w, cx)))
+    });
+    let sender = if m.is_draft { tr!("Draft", "Entwurf").to_string() } else { m.sender() };
+    let body_id = SharedString::from(format!("later-{}-{images}", m.id));
+    card(cx)
+        .child(
+            v_flex()
+                .px_6()
+                .pt_4()
+                .gap_0p5()
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .items_center()
+                        .child(div().flex_1().min_w_0().font_weight(FontWeight::MEDIUM).child(sender))
+                        .children(draft)
+                        .child(div().flex_none().text_xs().text_color(theme.muted_foreground).child(util::long_date(m.date()))),
+                )
+                .when(!to.is_empty(), |d| {
+                    d.child(div().text_xs().text_color(theme.muted_foreground).child(format!("{} {to}", tr!("To", "An"))))
+                }),
+        )
+        .child(
+            div().px_6().pt_3().pb_5().child(TextView::markdown(ElementId::Name(body_id), later.html.clone()).selectable(true)),
+        )
 }
 
 fn tool(

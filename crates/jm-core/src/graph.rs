@@ -376,6 +376,19 @@ impl Mailbox {
         self.json("GET", &format!("/me/messages/{}?$select={FULL_FIELDS}", enc(id)), PREFER_HTML, None)
     }
 
+    /// Every message of a conversation, in all folders (drafts and trash too), oldest first.
+    /// Each carries `unique_body`: what it adds, without the quoted mail.
+    pub fn conversation(&self, conversation_id: &str) -> Result<Vec<Message>> {
+        // Graph refuses $orderby next to this filter, so the order is ours
+        let filter = format!("conversationId eq '{}'", conversation_id.replace('\'', "''"));
+        let url = format!("/me/messages?$filter={}&$top=50&$select={SUMMARY_FIELDS},uniqueBody", enc(&filter));
+        let value: Value = self.json("GET", &url, PREFER_HTML, None)?;
+        let mut messages: Vec<Message> =
+            value.get("value").cloned().map(serde_json::from_value).transpose()?.unwrap_or_default();
+        messages.sort_by_key(Message::date);
+        Ok(messages)
+    }
+
     pub fn attachments(&self, id: &str) -> Result<Vec<Attachment>> {
         self.collect(&format!("/me/messages/{}/attachments?$select=id,name,contentType,size,isInline", enc(id)))
     }

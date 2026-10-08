@@ -75,6 +75,27 @@ pub struct Opened {
     pub html: SharedString,
     pub has_remote_images: bool,
     pub images_loaded: bool,
+    /// What came after it in the conversation (answers, ours and drafts included), oldest first.
+    pub thread: Vec<ThreadMessage>,
+}
+
+/// A later message of the open mail's conversation, shown below it with only its new part.
+pub struct ThreadMessage {
+    pub message: Message,
+    /// Markdown of the part that is new in it (`unique_body`).
+    pub html: SharedString,
+}
+
+impl ThreadMessage {
+    fn new(message: Message, remote: bool) -> Self {
+        let raw = match message.unique_body.as_ref().filter(|b| !b.content.trim().is_empty()) {
+            Some(b) if b.is_html() => b.content.clone(),
+            Some(b) => jm_core::html::text_to_html(&b.content),
+            None => jm_core::html::text_to_html(&message.body_preview),
+        };
+        let html = jm_core::html::to_display_markdown(&raw, remote).into();
+        ThreadMessage { message, html }
+    }
 }
 
 pub enum Pane {
@@ -497,6 +518,10 @@ impl MailApp {
                     refresh |= affects;
                     if let Some(ix) = ix {
                         self.load_folders(ix, window, cx);
+                        // an answer drafted through jm shows up below the open mail
+                        if matches!(&self.pane, Pane::Reader(o) if o.account == ix) {
+                            self.load_thread(window, cx);
+                        }
                     }
                 }
                 Event::Open { account, id } => {
@@ -581,12 +606,48 @@ impl MailApp {
                         if unread {
                             this.mark_read(true, window, cx);
                         }
+                        this.load_thread(window, cx);
                     }
                     Err(e) => {
                         this.pane = Pane::Empty;
                         this.notify_error(tr!("Could not open the mail", "E-Mail konnte nicht geöffnet werden"), &e, window, cx);
                     }
                 }
+            },
+        );
+    }
+
+    /// Fetch what came after the open mail in its conversation and show it below the mail. Mail
+    /// in the trash or junk folder stays out; without an answer from Graph nothing is shown.
+    fn load_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Pane::Reader(opened) = &self.pane else { return };
+        let Some(conversation) = opened.message.conversation_id.clone() else { return };
+        let Some(account) = self.accounts.get(opened.account) else { return };
+        let mailbox = account.mailbox.clone();
+        let hidden: Vec<String> = account
+            .folders
+            .iter()
+            .filter(|f| matches!(f.well_known.as_deref(), Some("deleteditems" | "junkemail")))
+            .map(|f| f.id.clone())
+            .collect();
+        let (id, after) = (opened.message.id.clone(), opened.message.date());
+        self.run(
+            window,
+            cx,
+            move || mailbox.conversation(&conversation),
+            move |this, result, _, _| {
+                let Pane::Reader(opened) = &mut this.pane else { return };
+                let Ok(messages) = result else { return };
+                if opened.message.id != id {
+                    return;
+                }
+                let remote = opened.images_loaded;
+                opened.thread = messages
+                    .into_iter()
+                    .filter(|m| m.id != id && m.date() > after)
+                    .filter(|m| m.parent_folder_id.as_ref().is_none_or(|f| !hidden.contains(f)))
+                    .map(|m| ThreadMessage::new(m, remote))
+                    .collect();
             },
         );
     }
@@ -870,6 +931,9 @@ impl MailApp {
             let html = opened.message.body.as_ref().map(|b| b.content.clone()).unwrap_or_default();
             opened.html = jm_core::html::to_display_markdown(&html, true).into();
             opened.images_loaded = true;
+            for later in &mut opened.thread {
+                *later = ThreadMessage::new(later.message.clone(), true);
+            }
             cx.notify();
         }
     }
@@ -907,6 +971,7 @@ fn reader_state(account: usize, message: Message, attachments: Vec<Attachment>, 
         attachments,
         has_remote_images,
         images_loaded: remote,
+        thread: Vec::new(),
     }
 }
 

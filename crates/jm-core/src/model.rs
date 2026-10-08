@@ -152,6 +152,9 @@ pub struct Message {
     pub bcc_recipients: Vec<Recipient>,
     #[serde(default)]
     pub body: Option<Body>,
+    /// Only what is new in this message, without the quoted mail (asked for in conversations).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unique_body: Option<Body>,
 }
 
 impl Message {

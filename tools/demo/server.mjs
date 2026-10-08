@@ -2,7 +2,8 @@
 // Usage: node tools/demo/server.mjs [port]   (tools/demo/run.sh starts it with the app)
 //
 // Implements just what Just Mail and jm call: folders, the well-known batch, listing with the
-// filters they use, search, messages with bodies, attachments, and draft/flag/read/move changes.
+// filters they use, search, conversations, messages with bodies, attachments, and draft/flag/read/move
+// changes.
 // The bearer token picks the mailbox ("demo-alex" or "demo-billing"). Nothing leaves localhost.
 import http from "node:http";
 
@@ -67,14 +68,15 @@ const alex = {
       { flag: { flagStatus: "flagged" }, hasAttachments: true, attachments: [pdf("harbor-kickoff-notes.pdf", 284_000)], isRead: false }),
     message("f-inbox", 47, person("Tom Becker", "tom@beckerandsons.example"), "Re: Quote for the website relaunch",
       `<div>Hi Alex,</div><div><br></div><div>thanks for the quick turnaround. The quote looks good to us, two things before we sign:</div><ul><li><b>Hosting:</b> can the first year be part of the package?</li><li><b>Content migration:</b> we have about 40 product pages, is that covered?</li></ul><div>If both are fine, we would like to start on <b>November 3</b>. The signed order form follows as soon as you confirm.</div><div><br></div><div>Our brand guide is here: <a href="https://beckerandsons.example/brand">beckerandsons.example/brand</a></div><div><br></div><div>Best regards</div><div>Tom Becker</div><div>Becker &amp; Sons</div>`,
-      { flag: { flagStatus: "flagged" }, hasAttachments: true, attachments: [pdf("quote-relaunch-v2.pdf", 142_000)] }),
+      { flag: { flagStatus: "flagged" }, hasAttachments: true, attachments: [pdf("quote-relaunch-v2.pdf", 142_000)], conversationId: "conv-quote" }),
     message("f-inbox", 95, person("Maria Lopez", "maria@lopez.example"), "Lunch on Thursday?",
       lines("Hey Alex,", "", "are you around on Thursday? The new place next to the station opened, I would love to try it.", "", "Maria"), { isRead: false }),
     message("f-inbox", 180, person("Paperclip Print Shop", "orders@paperclip.example"), "Your order #4821 has shipped",
       lines("Good news: your business cards are on their way.", "Tracking number: 00340434292135100125", "", "Paperclip Print Shop"),
       { isRead: false, hasAttachments: true, attachments: [pdf("invoice-4821.pdf", 58_000)] }),
     message("f-inbox", 60 * 20, person("Sam Carter", "sam@carter.example"), "Feedback on the prototype",
-      lines("Hi Alex,", "", "played with the prototype over the weekend. The onboarding is great, the settings page felt crowded. Notes below.", "", "Sam")),
+      lines("Hi Alex,", "", "played with the prototype over the weekend. The onboarding is great, the settings page felt crowded. Notes below.", "", "Sam"),
+      { conversationId: "conv-prototype" }),
     message("f-inbox", 60 * 26, person("Calendar", "calendar@northwind.example"), "Team sync moved to 3 pm",
       lines("The weekly team sync on Wednesday now starts at 3 pm.")),
     message("f-inbox", 60 * 30, person("Jonas Weber", "jonas@weber-studio.example"), "Invoice September",
@@ -97,7 +99,11 @@ const alex = {
       `<div id="jm-body">Sounds great, Thursday at 12:30 works for me.<br><br>See you there!</div>`,
       { isDraft: true, from: null, toRecipients: [person("Maria Lopez", "maria@lopez.example")] }),
     message("f-sent", 60 * 22, me, "Quote for the website relaunch",
-      lines("Hi Tom,", "", "attached is our quote for the relaunch.")),
+      lines("Hi Tom,", "", "attached is our quote for the relaunch."), { conversationId: "conv-quote" }),
+    message("f-sent", 60 * 19, me, "Re: Feedback on the prototype",
+      lines("Hi Sam,", "", "thanks for testing! Agreed on the settings page: I will split it into two tabs and send you a new build on Friday.", "", "Alex Morgan", "Northwind Studio", "northwind.example") +
+        `<hr><div><b>From:</b> Sam Carter<br><b>Subject:</b> Feedback on the prototype</div>`,
+      { conversationId: "conv-prototype", toRecipients: [person("Sam Carter", "sam@carter.example")] }),
     message("f-archive", 60 * 400, person("Northwind Bank", "service@bank.example"), "Your August statement", lines("August.")),
   ],
 };
@@ -122,6 +128,8 @@ function countFolders(box) {
 }
 
 const summary = ({ body, attachments, ...m }) => m;
+// Graph's uniqueBody: what a message adds; the demo's answers put the quote below an <hr>
+const unique = (m) => ({ ...summary(m), uniqueBody: { contentType: "html", content: m.body.content.split(/<hr/i)[0] } });
 const byDate = (a, b) => b.receivedDateTime.localeCompare(a.receivedDateTime);
 const folderId = (box, key) => box.wellKnown[key] || key;
 
@@ -133,6 +141,8 @@ function send(res, status, body) {
 function list(box, url, folder) {
   let items = box.messages.filter((m) => (folder ? m.parentFolderId === folderId(box, folder) : true));
   const filter = url.searchParams.get("$filter") || "";
+  const conversation = filter.match(/conversationId eq '([^']*)'/);
+  if (conversation) return { value: items.filter((m) => m.conversationId === conversation[1]).map(unique) };
   if (filter.includes("flag/flagStatus eq 'flagged'")) items = items.filter((m) => m.flag.flagStatus === "flagged");
   if (filter.includes("isRead eq false")) items = items.filter((m) => !m.isRead);
   if (filter.includes("hasAttachments eq true")) items = items.filter((m) => m.hasAttachments);
@@ -148,7 +158,7 @@ function list(box, url, folder) {
 function reply(box, original, all) {
   const draft = message("f-drafts", 0, me, `RE: ${original.subject.replace(/^(re|aw):\s*/i, "")}`,
     `<hr><div><b>From:</b> ${original.from.emailAddress.name}<br><b>Subject:</b> ${original.subject}</div><br>${original.body.content.replace(/<\/?(html|body)>/g, "")}`,
-    { isDraft: true, from: null, toRecipients: [original.from, ...(all ? original.ccRecipients : [])] });
+    { isDraft: true, from: null, toRecipients: [original.from, ...(all ? original.ccRecipients : [])], conversationId: original.conversationId });
   box.messages.push(draft);
   return draft;
 }
