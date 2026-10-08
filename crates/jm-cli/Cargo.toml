@@ -9,9 +9,8 @@ name = "jm"
 path = "src/main.rs"
 
 [dependencies]
-anyhow.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
+# Never enable jm-core's `send` feature here: the CLI and its MCP server only prepare drafts.
 jm-core.workspace = true
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }

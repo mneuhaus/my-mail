@@ -318,7 +318,34 @@ impl Mailbox {
         };
         let quoted = format!("\"{}\"", query.replace('"', ""));
         let url = format!("{base}?$search={}&$top={}&$select={SUMMARY_FIELDS}", enc(&quoted), top.max(1));
-        Ok(self.page(&url)?.messages)
+        let mut messages = self.page(&url)?.messages;
+        self.make_ids_immutable(&mut messages);
+        Ok(messages)
+    }
+
+    /// `$search` answers with regular ids even when immutable ones are asked for; translate them
+    /// so a message has the same id (and short id) however it was found, and keeps it when moved.
+    /// On failure the regular ids stay (they work, they just change on moves).
+    fn make_ids_immutable(&self, messages: &mut [Message]) {
+        // regular REST ids of mailbox items start with "AAMk", immutable ones with "AAkA"
+        let regular: Vec<&str> = messages.iter().map(|m| m.id.as_str()).filter(|id| id.starts_with("AAMk")).collect();
+        if regular.is_empty() {
+            return;
+        }
+        let body = json!({ "inputIds": regular, "sourceIdType": "restId", "targetIdType": "restImmutableEntryId" });
+        let Ok(resp) = self.json::<Value>("POST", "/me/translateExchangeIds", PREFER_IDS, Some(&body)) else { return };
+        let translated: std::collections::HashMap<&str, &str> = resp
+            .get("value")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|r| Some((r.get("sourceId")?.as_str()?, r.get("targetId")?.as_str()?)))
+            .collect();
+        for m in messages.iter_mut() {
+            if let Some(id) = translated.get(m.id.as_str()) {
+                m.id = (*id).to_string();
+            }
+        }
     }
 
     /// A message with its HTML body.

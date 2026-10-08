@@ -3655,11 +3655,9 @@ dependencies = [
 name = "jm-cli"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "chrono",
  "clap",
  "jm-core",
- "serde",
  "serde_json",
 ]
 
