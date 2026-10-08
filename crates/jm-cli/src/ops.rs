@@ -734,6 +734,9 @@ pub fn open(ctx: &Ctx, id: &str) -> Result<Value> {
                 std::thread::sleep(Duration::from_millis(500));
             }
             std::thread::sleep(Duration::from_secs(2));
+            // A cold start from the background leaves the app inactive, and GPUI only gets going
+            // once it is activated; asking again activates the now running app.
+            let _ = Command::new("open").args(["-b", APP_BUNDLE_ID]).stdout(Stdio::null()).stderr(Stdio::null()).status();
             note = Some("Just Mail was not running and has been started".to_string());
         } else {
             note = Some(format!("Just Mail is not running and could not be started (bundle {APP_BUNDLE_ID})"));

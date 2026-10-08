@@ -294,7 +294,10 @@ pub fn to_display_markdown(html: &str, remote_images: bool) -> String {
     let md = converter.convert(&clean).unwrap_or_else(|_| html_to_text(&clean));
     // a line holding only a hard break or nothing at all is spacing; keep at most one
     let lines: Vec<&str> = md.lines().map(str::trim_end).collect();
-    let is_space = |l: &str| l.is_empty() || l == "\\";
+    let is_space = |l: &str| {
+        let l = l.trim();
+        l.is_empty() || l == "\\"
+    };
     let mut out = String::with_capacity(md.len());
     let mut blank = 0;
     for (i, line) in lines.iter().enumerate() {
@@ -454,5 +457,7 @@ mod tests {
         assert!(md.contains("Danke!\\\nAnna\\\nSupport"), "{md}");
         let trailing = to_display_markdown("<p>weiter.<br></p><p>Danke</p>", false);
         assert_eq!(trailing, "weiter.\n\nDanke");
+        let indented = to_display_markdown("<div>This is a test<br>\n  <br></div>", false);
+        assert_eq!(indented, "This is a test");
     }
 }
