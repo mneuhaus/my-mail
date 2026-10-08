@@ -15,7 +15,7 @@ an MCP server) that share the same accounts. Mail goes through Microsoft Graph o
   out of the text field, so editing never mangles it or the quote. Two HTML signatures per account
   (taken from Spark): the long one for new mails, the short one for replies and forwards; logos go
   along as inline images.
-- **Sending only in the app**, from the draft, after a confirmation. The CLI and its MCP server are
+- **Sending only in the app**, from the draft (Send or ⌘↩). The CLI and its MCP server are
   built without the sending code (`jm-core` feature `send`, enabled only for the app): agents can
   prepare drafts, a person sends them.
 
@@ -49,8 +49,8 @@ Files: `~/.config/just-mail/config.toml` (accounts, signatures, read-only), `acc
 ## Keys
 
 `↑/↓` or `j/k` move, `r` reply, `a` reply all, `f` forward, `c`/`⌘N` new, `s` pin, `u` read/unread,
-`e` archive, `⌫` trash, `y` copy id, `/` or `⌘F` search, `⇧⌘N` check mail; in a draft `⌘↩` send
-(asks first) and `⌘S` save.
+`e` archive, `⌫` trash, `y` copy id, `/` or `⌘F` search, `⇧⌘N` check mail; in a draft `⌘↩` send and
+`⌘S` save.
 
 ## Build
 

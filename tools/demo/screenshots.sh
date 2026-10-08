@@ -1,6 +1,6 @@
 #!/bin/sh
 # Screenshots for the GitHub page (docs/), taken from the demo mailbox only, never from real mail.
-# Usage: tools/demo/screenshots.sh   (needs a release build: cargo build --release -p jm-app)
+# Usage: tools/demo/screenshots.sh   (needs release builds of app and jm: tools/bundle-macos.sh)
 set -eu
 cd "$(dirname "$0")/../.."
 APP=target/release/just-mail
@@ -17,14 +17,12 @@ shot() {
     printf '{"kind":"open","account":"alex","id":"%s"}\n' "$message" >> "$events"
     sleep 2
     if [ -n "$action" ]; then
-        demo_auth="Authorization: Bearer demo-alex" # the demo server's fixed token, not a secret
-        # the app reacts to Open events only; a reply draft is created through the demo server
-        curl -s -X POST -H "$demo_auth" "http://127.0.0.1:7358/v1.0/me/messages/$message/createReply" > /tmp/jm-demo-draft.json
-        draft=$(sed 's/.*"id":"\(msg-[0-9]*\)".*/\1/' /tmp/jm-demo-draft.json | head -1)
-        curl -s -X PATCH -H "$demo_auth" -H "content-type: application/json" \
-            -d '{"body":{"content":"<html><body><div id=\"jm-body\">Hi Tom,<br><br>hosting for the first year is included, and the 40 product pages are covered as well.<br><br>November 3 works for us, I am looking forward to it.</div><div id=\"jm-signature\"><br>Alex Morgan<br>Northwind Studio<br>northwind.example</div></body></html>"}}' \
-            "http://127.0.0.1:7358/v1.0/me/messages/$draft" > /dev/null
-        printf '{"kind":"open","account":"alex","id":"%s"}\n' "$draft" >> "$events"
+        # a real reply through jm against the demo mailbox: text, signature, quote
+        jm() { JUST_MAIL_HOME="$PWD/tmp/demo-home" JUST_MAIL_GRAPH_URL=http://127.0.0.1:7358/v1.0 target/release/jm "$@"; }
+        original=$(jm --json search "website relaunch" | jq -r '.messages[] | select(.subject | startswith("Re:")) | .id' | head -1)
+        printf 'Hi Tom,\n\nhosting for the first year is included, and the 40 product pages are covered as well.\n\nNovember 3 works for us, I am looking forward to it.\n' > tmp/demo-reply.txt
+        draft=$(jm --json drafts reply "$original" --body-file tmp/demo-reply.txt | jq -r .draft.id)
+        jm open "$draft" > /dev/null
         sleep 2
     fi
     pid=$(pgrep -n -f "$APP")

@@ -12,6 +12,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, Selectable as _, Sizable, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -19,7 +20,8 @@ use jm_core::{Attachment, DraftInput, Mailbox, Message, NewAttachment, Recipient
 
 use crate::actions::{self, SaveDraft, SendDraft};
 use crate::sidebar::TOP_H;
-use crate::{i18n, tr, util};
+use crate::signature::Preview;
+use crate::{tr, util};
 
 const AUTOSAVE: Duration = Duration::from_secs(2);
 
@@ -46,6 +48,11 @@ pub struct Composer {
     attachments: Vec<Attachment>,
     /// Draft written by Just Mail (body field = author's part only).
     has_markers: bool,
+    /// The signature as it goes out, shown below the text (long for new mails, short for answers).
+    signature: Option<Preview>,
+    /// The quoted mail of a reply or forward (Markdown), shown below the signature on request.
+    quote: Option<SharedString>,
+    show_quote: bool,
     /// Body text as last saved, to tell whether the body needs saving.
     saved_body: String,
     dirty: bool,
@@ -70,7 +77,7 @@ impl Composer {
         let bcc = field(tr!("Blind copy", "Blindkopie"), window, cx);
         let subject = field(tr!("Subject", "Betreff"), window, cx);
         let body = cx.new(|cx| {
-            TextareaState::new(window, cx).placeholder(tr!("Write your message…", "Deine Nachricht…"))
+            TextareaState::new(window, cx).auto_grow(8, 100_000).placeholder(tr!("Write your message…", "Deine Nachricht…"))
         });
         let mut subscriptions = Vec::new();
         for input in [&to, &cc, &bcc, &subject] {
@@ -98,6 +105,9 @@ impl Composer {
             show_cc: false,
             attachments: Vec::new(),
             has_markers: true,
+            signature: None,
+            quote: None,
+            show_quote: false,
             saved_body: String::new(),
             dirty: false,
             saving: false,
@@ -112,9 +122,17 @@ impl Composer {
 
     /// A new, empty mail.
     pub fn blank(account: usize, mailbox: Arc<Mailbox>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let this = Self::base(account, mailbox, window, cx);
+        let mut this = Self::base(account, mailbox, window, cx);
+        this.signature = this.signature_preview(false, "new");
         this.to.update(cx, |s, cx| s.focus(window, cx));
         this
+    }
+
+    /// Preview of the account signature a new mail (`answer == false`) or a reply gets.
+    fn signature_preview(&self, answer: bool, key: &str) -> Option<Preview> {
+        let account = &self.mailbox.account;
+        let block = if answer { account.reply_signature_block() } else { account.signature_block() }?;
+        Some(Preview::new(format!("compose-signature-{}-{key}", account.id), &block))
     }
 
     /// An existing draft, fetched first.
@@ -172,6 +190,11 @@ impl Composer {
         self.show_cc = !message.cc_recipients.is_empty() || !message.bcc_recipients.is_empty();
         let (to, cc, bcc) = (join(&message.to_recipients), join(&message.cc_recipients), join(&message.bcc_recipients));
         let subject = message.subject.clone().unwrap_or_default();
+        // A Just Mail draft shows what follows the text: the signature, then a reply's quote.
+        let quote = html::quote_html(&document).filter(|_| markers);
+        self.quote = quote.map(|q| html::to_display_markdown(q, false).into());
+        let answer = quote.is_some() || is_answer_subject(&subject);
+        self.signature = if markers && html::has_signature(&document) { self.signature_preview(answer, &message.id) } else { None };
         self.to.update(cx, |s, cx| s.set_value(to, window, cx));
         self.cc.update(cx, |s, cx| s.set_value(cc, window, cx));
         self.bcc.update(cx, |s, cx| s.set_value(bcc, window, cx));
@@ -300,7 +323,7 @@ impl Composer {
         );
     }
 
-    /// Ask, then send.
+    /// Send right away (no confirmation): saves pending edits first.
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.sending || self.loading {
             return;
@@ -313,43 +336,13 @@ impl Composer {
                 return;
             }
         };
-        let to = to.unwrap_or_default();
-        if to.is_empty() && cc.as_ref().is_none_or(|c| c.is_empty()) && bcc.as_ref().is_none_or(|b| b.is_empty()) {
+        let nobody = |list: &Option<Vec<Recipient>>| list.as_ref().is_none_or(|l| l.is_empty());
+        if nobody(&to) && nobody(&cc) && nobody(&bcc) {
             self.error = Some(tr!("Add at least one recipient.", "Mindestens einen Empfänger eintragen.").into());
             cx.notify();
             return;
         }
-        let everyone: Vec<String> = to
-            .iter()
-            .chain(cc.iter().flatten())
-            .chain(bcc.iter().flatten())
-            .map(|r| r.address.clone())
-            .collect();
-        let subject = Self::value(&self.subject, cx);
-        let subject = if subject.is_empty() { tr!("(no subject)", "(kein Betreff)").to_string() } else { subject };
-        let from = self.mailbox.account.email.clone();
-        let description = if i18n::german() {
-            format!("Von {from}\nAn {}\nBetreff: {subject}", everyone.join(", "))
-        } else {
-            format!("From {from}\nTo {}\nSubject: {subject}", everyone.join(", "))
-        };
-        let this = cx.entity().downgrade();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let this = this.clone();
-            alert
-                .title(tr!("Send this mail?", "Diese E-Mail senden?"))
-                .description(description.clone())
-                .show_cancel(true)
-                .ok_text(tr!("Send", "Senden"))
-                .cancel_text(tr!("Cancel", "Abbrechen"))
-                .on_ok(move |_, window, cx| {
-                    let _ = this.update(cx, |c, cx| c.confirmed_send(window, cx));
-                    true
-                })
-        });
-    }
-
-    fn confirmed_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.error = None;
         if self.dirty || self.draft.is_none() || self.saving {
             self.send_after_save = true;
             if !self.saving {
@@ -473,21 +466,6 @@ impl Composer {
         });
     }
 
-    /// First lines of the signature as one line, for the hint under the text.
-    fn signature_line(&self, cx: &App) -> Option<String> {
-        let account = &self.mailbox.account;
-        let block = if self.is_answer(cx) { account.reply_signature_block()? } else { account.signature_block()? };
-        let text = html::html_to_text(&block);
-        let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).take(3).collect();
-        (!lines.is_empty()).then(|| lines.join("  ·  "))
-    }
-
-    /// A reply or forward (its quote sits below the signature).
-    fn is_answer(&self, cx: &App) -> bool {
-        let subject = Self::value(&self.subject, cx).to_lowercase();
-        ["re:", "aw:", "fw:", "fwd:", "wg:", "antw:"].iter().any(|p| subject.starts_with(p))
-    }
-
     fn status(&self) -> String {
         if self.sending {
             tr!("Sending…", "Wird gesendet…").into()
@@ -543,7 +521,7 @@ impl Render for Composer {
                     .icon(IconName::Send)
                     .label(tr!("Send", "Senden"))
                     .disabled(busy)
-                    .tooltip(tr!("Send (⌘↩), asks first", "Senden (⌘↩), mit Rückfrage"))
+                    .tooltip(tr!("Send now (⌘↩)", "Jetzt senden (⌘↩)"))
                     .on_click(cx.listener(|this, _, w, cx| this.send(w, cx))),
             )
             .child(
@@ -647,37 +625,68 @@ impl Render for Composer {
             .child(field_row(tr!("Subject", "Betreff"), Input::new(&self.subject).appearance(false), cx))
             .when(!self.attachments.is_empty(), |d| d.child(attachments))
             .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .px_3()
-                    .py_2()
-                    .child(Textarea::new(&self.body).appearance(false).h_full()),
-            )
-            .when_some(self.signature_line(cx).filter(|_| self.has_markers), |d, line| {
-                let quoted = self.is_answer(cx);
-                d.child(
+                // the mail as it goes out: your text, the signature, then a reply's quote
+                div().id("compose-scroll").flex_1().min_h_0().overflow_y_scroll().child(
                     v_flex()
-                        .px_5()
-                        .py_2()
-                        .gap_0p5()
-                        .border_t_1()
-                        .border_color(theme.border.opacity(0.6))
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(
-                            h_flex()
-                                .gap_1p5()
-                                .child(div().flex_none().font_weight(FontWeight::MEDIUM).child(tr!("Signature", "Signatur")))
-                                .child(div().flex_1().min_w_0().truncate().child(line)),
-                        )
-                        .when(quoted, |d| {
-                            d.child(tr!(
-                                "The quoted mail follows below the signature.",
-                                "Darunter folgt die zitierte E-Mail."
-                            ))
+                        .px_3()
+                        .pt_2()
+                        .pb_6()
+                        .child(Textarea::new(&self.body).appearance(false))
+                        .when_some(self.signature.as_ref(), |d, signature| {
+                            d.child(
+                                div()
+                                    .id("compose-signature")
+                                    .mx_2()
+                                    .mt_2()
+                                    .pt_3()
+                                    .border_t_1()
+                                    .border_color(theme.border.opacity(0.6))
+                                    .text_sm()
+                                    .child(signature.render())
+                                    .tooltip(|w, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(tr!(
+                                            "Signature: change it under Accounts & signatures",
+                                            "Signatur: änderbar unter Konten & Signaturen"
+                                        ))
+                                        .build(w, cx)
+                                    }),
+                            )
+                        })
+                        .when_some(self.quote.clone(), |d, quote| {
+                            let toggle = Button::new("toggle-quote")
+                                .ghost()
+                                .xsmall()
+                                .icon(if self.show_quote { IconName::ChevronUp } else { IconName::Ellipsis })
+                                .label(if self.show_quote {
+                                    tr!("Hide quoted mail", "Zitierte E-Mail ausblenden")
+                                } else {
+                                    tr!("Show quoted mail", "Zitierte E-Mail anzeigen")
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.show_quote = !this.show_quote;
+                                    cx.notify();
+                                }));
+                            d.child(h_flex().mx_2().mt_4().child(toggle)).when(self.show_quote, |d| {
+                                d.child(
+                                    div()
+                                        .mx_2()
+                                        .mt_2()
+                                        .p_4()
+                                        .rounded(px(8.))
+                                        .bg(theme.muted)
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child(TextView::markdown("compose-quote", quote)),
+                                )
+                            })
                         }),
-                )
-            })
+                ),
+            )
     }
+}
+
+/// Subject of a reply or forward ("RE:", "AW:", "FW:", "WG:" …).
+fn is_answer_subject(subject: &str) -> bool {
+    let subject = subject.trim_start().to_lowercase();
+    ["re:", "aw:", "fw:", "fwd:", "wg:", "antw:"].iter().any(|p| subject.starts_with(p))
 }

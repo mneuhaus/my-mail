@@ -200,6 +200,20 @@ pub fn has_signature(document: &str) -> bool {
     element_inner(document, SIGNATURE_ID).is_some()
 }
 
+/// The quoted mail of a reply or forward draft: what follows the signature block (or, without
+/// one, the author's block), up to `</body>`. `None` for a new mail or a draft without markers.
+pub fn quote_html(document: &str) -> Option<&str> {
+    let (_, inner_end) = element_inner(document, SIGNATURE_ID).or_else(|| element_inner(document, BODY_ID))?;
+    let after = document[inner_end..].find('>').map(|i| inner_end + i + 1)?;
+    let rest = &document[after..];
+    // ASCII lowercasing keeps byte offsets
+    let rest = match rest.to_ascii_lowercase().rfind("</body") {
+        Some(end) => &rest[..end],
+        None => rest,
+    };
+    (!html_to_text(rest).trim().is_empty()).then_some(rest)
+}
+
 /// HTML to editable plain text: the inverse of [`text_to_html`] for our own markup, a decent
 /// approximation for anything else.
 pub fn html_to_text(html: &str) -> String {
@@ -420,6 +434,15 @@ mod tests {
     fn finds_blocks_after_exchange_rewrote_them() {
         let doc = "<html><head></head><body><div id=\"x_jm-body\" style=\"a\">hi</div><div>quote</div></body></html>";
         assert_eq!(author_html(doc), Some("hi"));
+    }
+
+    #[test]
+    fn finds_the_quote_below_the_signature() {
+        let new = new_document("Hallo", "<div>Marc</div>");
+        assert_eq!(quote_html(&new), None);
+        let reply = insert_at_top("<html><body><hr><div>Von: Tom</div><div>alte Mail</div></body></html>", &compose_blocks("Danke", "<div>Marc</div>"));
+        let quote = quote_html(&reply).unwrap();
+        assert!(quote.contains("alte Mail") && !quote.contains("Danke") && !quote.contains("Marc"));
     }
 
     #[test]
