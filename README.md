@@ -7,11 +7,14 @@ an MCP server) that share the same accounts. Mail goes through Microsoft Graph o
   (no marking as read, flags, moves or drafts), for mailboxes another system processes.
 - **Read**: HTML mail is cleaned up for reading (no scripts, no tracking pixels: remote images only
   on request).
-- **Flag** mail you still have to deal with: the Outlook follow-up flag, so Outlook and phones see
-  it too. *Flagged* lists flagged mail of all accounts.
+- **Pin** mail you still have to deal with (Spark's pin, stored as the Outlook follow-up flag, so
+  Outlook and phones see it too). Pinned mail sits on top of the inbox; *Pinned* lists it for all
+  accounts. Right-click a mail for reply, pin, read/unread, archive, delete or discard (drafts).
 - **Drafts live on the server.** New mail, replies (in the conversation, above the quote) and
   forwards are Graph drafts; the editor saves while you type. Your signature is added once and kept
-  out of the text field, so editing never mangles it or the quote.
+  out of the text field, so editing never mangles it or the quote. Two HTML signatures per account
+  (taken from Spark): the long one for new mails, the short one for replies and forwards; logos go
+  along as inline images.
 - **Sending only in the app**, from the draft, after a confirmation. The CLI and its MCP server are
   built without the sending code (`jm-core` feature `send`, enabled only for the app): agents can
   prepare drafts, a person sends them.
@@ -45,7 +48,7 @@ Files: `~/.config/just-mail/config.toml` (accounts, signatures, read-only), `acc
 
 ## Keys
 
-`↑/↓` or `j/k` move, `r` reply, `a` reply all, `f` forward, `c`/`⌘N` new, `s` flag, `u` read/unread,
+`↑/↓` or `j/k` move, `r` reply, `a` reply all, `f` forward, `c`/`⌘N` new, `s` pin, `u` read/unread,
 `e` archive, `⌫` trash, `y` copy id, `/` or `⌘F` search, `⇧⌘N` check mail; in a draft `⌘↩` send
 (asks first) and `⌘S` save.
 
