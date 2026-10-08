@@ -61,3 +61,10 @@ swift tools/make-icon.swift      # redraw the icon
 ```
 
 Crates: `jm-core` (accounts, sign-in, Graph, draft HTML), `jm-cli` (`jm`), `jm-app` (GPUI).
+
+This repo is public. After cloning, turn on the checks that keep secrets and local files out of
+commits and pushes (they use [gitleaks](https://github.com/gitleaks/gitleaks), `brew install gitleaks`):
+
+```
+git config core.hooksPath .githooks
+```
