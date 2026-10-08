@@ -192,7 +192,7 @@ impl Composer {
         let subject = message.subject.clone().unwrap_or_default();
         // A Just Mail draft shows what follows the text: the signature, then a reply's quote.
         let quote = html::quote_html(&document).filter(|_| markers);
-        self.quote = quote.map(|q| html::to_display_markdown(q, false).into());
+        self.quote = quote.map(|q| html::to_display_markdown(q, false, &[]).into());
         let answer = quote.is_some() || is_answer_subject(&subject);
         self.signature = if markers && html::has_signature(&document) { self.signature_preview(answer, &message.id) } else { None };
         self.to.update(cx, |s, cx| s.set_value(to, window, cx));

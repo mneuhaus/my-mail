@@ -37,7 +37,7 @@ impl Preview {
             rest = &rest[end..];
         }
         marked.push_str(rest);
-        let md = jm_core::html::to_display_markdown(&marked, false);
+        let md = jm_core::html::to_display_markdown(&marked, false, &[]);
 
         let mut parts = Vec::new();
         let mut text = md.as_str();
@@ -45,7 +45,7 @@ impl Preview {
             push_text(&mut parts, &text[..at]);
             let digits: String = text[at + PLACEHOLDER.len()..].chars().take_while(char::is_ascii_digit).collect();
             if let Some(image) = digits.parse::<usize>().ok().and_then(|ix| images.get(ix)) {
-                let (w, h) = png_size(&image.bytes).unwrap_or((MAX_W as u32, MAX_W as u32));
+                let (w, h) = jm_core::html::image_size(&image.bytes).unwrap_or((MAX_W as u32, MAX_W as u32));
                 let scale = (MAX_W / w as f32).min(1.0);
                 let format = if image.content_type.contains("jpeg") { ImageFormat::Jpeg } else { ImageFormat::Png };
                 parts.push(Part::Image(
@@ -82,14 +82,4 @@ fn push_text(parts: &mut Vec<Part>, md: &str) {
     if !md.is_empty() {
         parts.push(Part::Text(md.to_string().into()));
     }
-}
-
-/// Width and height from a PNG header.
-fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
-    if bytes.len() < 24 || &bytes[1..4] != b"PNG" {
-        return None;
-    }
-    let w = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
-    let h = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
-    (w > 0 && h > 0).then_some((w, h))
 }

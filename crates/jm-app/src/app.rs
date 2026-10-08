@@ -15,7 +15,8 @@ use gpui_kit::component::{ActiveTheme, WindowExt};
 use gpui_kit::*;
 use jm_core::events::{Event, EventReader};
 use jm_core::graph::{ListQuery, Page};
-use jm_core::{AccountConfig, Attachment, Config, FlagStatus, Folder, Mailbox, Message, ids};
+use jm_core::html::InlineImage;
+use jm_core::{AccountConfig, Attachment, Body, Config, FlagStatus, Folder, Mailbox, Message, ids};
 
 use crate::actions::{self, *};
 use crate::composer::{Composer, ComposerEvent};
@@ -73,28 +74,57 @@ pub struct Opened {
     pub attachments: Vec<Attachment>,
     /// The body as Markdown (see `jm_core::html::to_display_markdown`).
     pub html: SharedString,
+    /// The pictures the body embeds (logos in signatures, pasted screenshots), once fetched.
+    pub pictures: Vec<InlineImage>,
     pub has_remote_images: bool,
     pub images_loaded: bool,
     /// What came after it in the conversation (answers, ours and drafts included), oldest first.
     pub thread: Vec<ThreadMessage>,
 }
 
+impl Opened {
+    /// Convert the body again, after its pictures arrived or remote images were allowed.
+    fn render(&mut self) {
+        let html = body_html(self.message.body.as_ref());
+        self.html = jm_core::html::to_display_markdown(&html, self.images_loaded, &self.pictures).into();
+    }
+}
+
+/// A body as HTML; plain text becomes HTML.
+fn body_html(body: Option<&Body>) -> String {
+    match body {
+        Some(b) if b.is_html() => b.content.clone(),
+        Some(b) => jm_core::html::text_to_html(&b.content),
+        None => String::new(),
+    }
+}
+
 /// A later message of the open mail's conversation, shown below it with only its new part.
 pub struct ThreadMessage {
     pub message: Message,
-    /// Markdown of the part that is new in it (`unique_body`).
+    pub pictures: Vec<InlineImage>,
+    /// Markdown of the part that is new in it.
     pub html: SharedString,
 }
 
 impl ThreadMessage {
-    fn new(message: Message, remote: bool) -> Self {
-        let raw = match message.unique_body.as_ref().filter(|b| !b.content.trim().is_empty()) {
-            Some(b) if b.is_html() => b.content.clone(),
-            Some(b) => jm_core::html::text_to_html(&b.content),
+    fn new(message: Message, pictures: Vec<InlineImage>, remote: bool) -> Self {
+        let mut later = ThreadMessage { message, pictures, html: SharedString::default() };
+        later.render(remote);
+        later
+    }
+
+    /// What a message adds, as HTML: Graph's `unique_body`, else its preview.
+    fn new_part(message: &Message) -> String {
+        match message.unique_body.as_ref().filter(|b| !b.content.trim().is_empty()) {
+            Some(b) => body_html(Some(b)),
             None => jm_core::html::text_to_html(&message.body_preview),
-        };
-        let html = jm_core::html::to_display_markdown(&raw, remote).into();
-        ThreadMessage { message, html }
+        }
+    }
+
+    fn render(&mut self, remote: bool) {
+        let html = Self::new_part(&self.message);
+        self.html = jm_core::html::to_display_markdown(&html, remote, &self.pictures).into();
     }
 }
 
@@ -606,6 +636,7 @@ impl MailApp {
                         if unread {
                             this.mark_read(true, window, cx);
                         }
+                        this.load_pictures(window, cx);
                         this.load_thread(window, cx);
                     }
                     Err(e) => {
@@ -631,23 +662,53 @@ impl MailApp {
             .map(|f| f.id.clone())
             .collect();
         let (id, after) = (opened.message.id.clone(), opened.message.date());
+        let wanted = id.clone();
         self.run(
             window,
             cx,
-            move || mailbox.conversation(&conversation),
+            move || {
+                let later = mailbox.conversation(&conversation)?.into_iter().filter(|m| {
+                    m.id != id && m.date() > after && m.parent_folder_id.as_ref().is_none_or(|f| !hidden.contains(f))
+                });
+                Ok(later
+                    .map(|m| {
+                        let pictures = mailbox.inline_images(&m.id, &ThreadMessage::new_part(&m)).unwrap_or_default();
+                        (m, pictures)
+                    })
+                    .collect::<Vec<_>>())
+            },
             move |this, result, _, _| {
                 let Pane::Reader(opened) = &mut this.pane else { return };
-                let Ok(messages) = result else { return };
-                if opened.message.id != id {
+                let Ok(later) = result else { return };
+                if opened.message.id != wanted {
                     return;
                 }
                 let remote = opened.images_loaded;
-                opened.thread = messages
-                    .into_iter()
-                    .filter(|m| m.id != id && m.date() > after)
-                    .filter(|m| m.parent_folder_id.as_ref().is_none_or(|f| !hidden.contains(f)))
-                    .map(|m| ThreadMessage::new(m, remote))
-                    .collect();
+                opened.thread = later.into_iter().map(|(m, pictures)| ThreadMessage::new(m, pictures, remote)).collect();
+            },
+        );
+    }
+
+    /// Fetch the pictures the open mail embeds and show them; its text is there already.
+    fn load_pictures(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Pane::Reader(opened) = &self.pane else { return };
+        let html = body_html(opened.message.body.as_ref());
+        if jm_core::html::content_ids(&html).is_empty() {
+            return;
+        }
+        let Some(mailbox) = self.accounts.get(opened.account).map(|a| a.mailbox.clone()) else { return };
+        let id = opened.message.id.clone();
+        let wanted = id.clone();
+        self.run(
+            window,
+            cx,
+            move || mailbox.inline_images(&id, &html),
+            move |this, result, _, _| {
+                let (Pane::Reader(opened), Ok(pictures)) = (&mut this.pane, result) else { return };
+                if opened.message.id == wanted && !pictures.is_empty() {
+                    opened.pictures = pictures;
+                    opened.render();
+                }
             },
         );
     }
@@ -928,11 +989,10 @@ impl MailApp {
 
     pub fn load_images(&mut self, cx: &mut Context<Self>) {
         if let Pane::Reader(opened) = &mut self.pane {
-            let html = opened.message.body.as_ref().map(|b| b.content.clone()).unwrap_or_default();
-            opened.html = jm_core::html::to_display_markdown(&html, true).into();
             opened.images_loaded = true;
+            opened.render();
             for later in &mut opened.thread {
-                *later = ThreadMessage::new(later.message.clone(), true);
+                later.render(true);
             }
             cx.notify();
         }
@@ -959,20 +1019,21 @@ impl MailApp {
     }
 }
 
-/// Reader state for a fetched message: sanitized HTML (plain text bodies become HTML too).
+/// Reader state for a fetched message; its pictures and conversation follow.
 fn reader_state(account: usize, message: Message, attachments: Vec<Attachment>, remote: bool) -> Opened {
-    let body = message.body.clone().unwrap_or_default();
-    let raw = if body.is_html() { body.content } else { jm_core::html::text_to_html(&body.content) };
-    let has_remote_images = jm_core::html::has_remote_images(&raw);
-    Opened {
+    let has_remote_images = jm_core::html::has_remote_images(&body_html(message.body.as_ref()));
+    let mut opened = Opened {
         account,
-        html: jm_core::html::to_display_markdown(&raw, remote).into(),
+        html: SharedString::default(),
         message,
         attachments,
+        pictures: Vec::new(),
         has_remote_images,
         images_loaded: remote,
         thread: Vec::new(),
-    }
+    };
+    opened.render();
+    opened
 }
 
 impl Focusable for MailApp {

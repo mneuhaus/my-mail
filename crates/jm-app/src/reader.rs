@@ -192,7 +192,7 @@ impl MailApp {
                 )
         });
 
-        let body_id = SharedString::from(format!("body-{}-{}", m.id, opened.images_loaded));
+        let body_id = SharedString::from(format!("body-{}-{}-{}", m.id, opened.images_loaded, opened.pictures.len()));
         let body = TextView::markdown(ElementId::Name(body_id), opened.html.clone()).selectable(true);
         let later: Vec<_> = (opened.thread.iter().enumerate())
             .map(|(i, t)| later_card(i, t, opened.account, opened.images_loaded, cx))

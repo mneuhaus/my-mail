@@ -390,7 +390,43 @@ impl Mailbox {
     }
 
     pub fn attachments(&self, id: &str) -> Result<Vec<Attachment>> {
-        self.collect(&format!("/me/messages/{}/attachments?$select=id,name,contentType,size,isInline", enc(id)))
+        // contentId only exists on file attachments, so it is asked for with a type cast
+        self.collect(&format!(
+            "/me/messages/{}/attachments?$select=id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId",
+            enc(id)
+        ))
+    }
+
+    /// The pictures `body_html` (the body of message `id`) embeds as `<img src="cid:…">`,
+    /// fetched side by side. Ones bigger than 2 MB or that fail to load stay out.
+    pub fn inline_images(&self, id: &str, body_html: &str) -> Result<Vec<html::InlineImage>> {
+        let wanted = html::content_ids(body_html);
+        if wanted.is_empty() {
+            return Ok(Vec::new());
+        }
+        let attachments = self.attachments(id)?;
+        let picks: Vec<(&Attachment, String)> = attachments
+            .iter()
+            .filter(|a| a.is_file() && a.size <= 2 * 1024 * 1024)
+            .filter_map(|a| {
+                let cid = html::content_id(a.content_id.as_deref()?);
+                wanted.iter().any(|w| w.eq_ignore_ascii_case(&cid)).then_some((a, cid))
+            })
+            .take(24)
+            .collect();
+        Ok(std::thread::scope(|scope| {
+            let jobs: Vec<_> = picks
+                .into_iter()
+                .map(|(a, content_id)| {
+                    scope.spawn(move || {
+                        let bytes = self.attachment_bytes(id, &a.id).ok()?;
+                        let content_type = a.content_type.clone().unwrap_or_default();
+                        Some(html::InlineImage { content_id, name: a.name.clone(), content_type, bytes })
+                    })
+                })
+                .collect();
+            jobs.into_iter().filter_map(|job| job.join().ok().flatten()).collect()
+        }))
     }
 
     pub fn attachment_bytes(&self, message_id: &str, attachment_id: &str) -> Result<Vec<u8>> {

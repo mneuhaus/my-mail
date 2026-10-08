@@ -216,6 +216,9 @@ pub struct Attachment {
     pub size: u64,
     #[serde(default)]
     pub is_inline: bool,
+    /// How the body refers to it (`<img src="cid:…">`); file attachments only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_id: Option<String>,
     #[serde(rename = "@odata.type", default)]
     pub odata_type: String,
 }

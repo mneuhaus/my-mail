@@ -59,16 +59,12 @@ pub struct InlineImage {
 /// `{stem}-1.png`, `{stem}-2.jpg`, …; content ids are `{name}@{token}`, so a token unique per
 /// draft keeps them apart from the ids a quoted mail brings along. Images that don't decode stay.
 pub fn inline_data_images(html: &str, stem: &str, token: &str) -> (String, Vec<InlineImage>) {
-    use base64::Engine as _;
     let lower = html.to_ascii_lowercase();
     let mut out = String::with_capacity(html.len());
     let mut images = Vec::new();
     let mut copied = 0;
-    let mut search = 0;
-    while let Some(i) = lower[search..].find("<img").map(|i| search + i) {
-        let tag_end = lower[i..].find('>').map(|e| i + e).unwrap_or(lower.len());
-        search = tag_end;
-        let Some((start, end)) = src_value(&lower, i, tag_end) else { continue };
+    for (tag_start, tag_end) in img_tags(&lower) {
+        let Some((start, end)) = attr_value(&lower, tag_start, tag_end, "src") else { continue };
         let value = &html[start..end];
         let Some((content_type, data)) = value
             .strip_prefix("data:")
@@ -78,10 +74,7 @@ pub fn inline_data_images(html: &str, stem: &str, token: &str) -> (String, Vec<I
         else {
             continue;
         };
-        let data: String = data.chars().filter(|c| !c.is_whitespace()).collect();
-        let Ok(bytes) = base64::engine::general_purpose::STANDARD_NO_PAD.decode(data.trim_end_matches('=')) else {
-            continue;
-        };
+        let Some(bytes) = decode_base64(data) else { continue };
         let content_type = content_type.to_ascii_lowercase();
         let ext = match content_type.trim_start_matches("image/") {
             "jpeg" | "pjpeg" => "jpg",
@@ -99,19 +92,37 @@ pub fn inline_data_images(html: &str, stem: &str, token: &str) -> (String, Vec<I
     (out, images)
 }
 
-/// Byte range of the `src` attribute value inside the tag `lower[tag_start..tag_end]`.
-fn src_value(lower: &str, tag_start: usize, tag_end: usize) -> Option<(usize, usize)> {
+/// Base64 as mail writes it: wrapped, padded or not.
+fn decode_base64(data: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    let data: String = data.chars().filter(|c| !c.is_whitespace()).collect();
+    base64::engine::general_purpose::STANDARD_NO_PAD.decode(data.trim_end_matches('=')).ok()
+}
+
+/// `(start, end)` of every `<img …>` tag in lowercased HTML, `end` at its `>`.
+fn img_tags(lower: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
+    let mut search = 0;
+    std::iter::from_fn(move || {
+        let start = search + lower.get(search..)?.find("<img")?;
+        let end = lower[start..].find('>').map_or(lower.len(), |e| start + e);
+        search = end;
+        Some((start, end))
+    })
+}
+
+/// Byte range of the value of attribute `name` inside the tag `lower[tag_start..tag_end]`.
+fn attr_value(lower: &str, tag_start: usize, tag_end: usize, name: &str) -> Option<(usize, usize)> {
     let tag = &lower[tag_start..tag_end];
     let mut from = 0;
     let attr = loop {
-        let at = from + tag[from..].find("src")?;
+        let at = from + tag[from..].find(name)?;
         let before = tag[..at].chars().next_back();
-        from = at + 3;
+        from = at + name.len();
         if before.is_some_and(char::is_whitespace) && tag[from..].trim_start().starts_with('=') {
             break at;
         }
     };
-    let after_eq = attr + 3 + tag[attr + 3..].find('=')? + 1;
+    let after_eq = attr + name.len() + tag[attr + name.len()..].find('=')? + 1;
     let rest = &tag[after_eq..];
     let value_start = after_eq + (rest.len() - rest.trim_start().len());
     let (start, end) = match tag[value_start..].chars().next()? {
@@ -287,21 +298,24 @@ pub fn to_readable_text(html: &str, width: usize) -> String {
     html2text::from_read(html.as_bytes(), width).unwrap_or_else(|_| html_to_text(html))
 }
 
-/// Clean mail HTML for display: no scripts, styles or event handlers; remote images only on
-/// request (they are mostly tracking pixels), embedded `cid:` images are dropped.
+/// Clean mail HTML for display: no scripts, styles or event handlers, no remote images unless
+/// asked for (they are mostly tracking pixels), layout tables flattened.
 pub fn sanitize_for_display(html: &str, remote_images: bool) -> String {
     let mut builder = ammonia::Builder::default();
     builder.link_rel(Some("noopener noreferrer"));
     if !remote_images {
         builder.rm_tags(["img"]);
     }
-    flatten_layout_tables(&builder.clean(html).to_string())
+    flatten_layout_tables(&join_short_rows(&builder.clean(html).to_string()))
 }
 
 /// Mail HTML as Markdown for display: cleaned like [`sanitize_for_display`], then converted, so
-/// paragraphs, line breaks, lists, emphasis and links survive while layout noise goes.
-pub fn to_display_markdown(html: &str, remote_images: bool) -> String {
-    let clean = sanitize_for_display(html, remote_images);
+/// paragraphs, line breaks, lists, emphasis and links survive while layout noise goes. Pictures
+/// show when they can: the embedded ones (`images` for `cid:` references, `data:` ones) and,
+/// with `remote_images`, those from the web that say how big they are.
+pub fn to_display_markdown(html: &str, remote_images: bool, images: &[InlineImage]) -> String {
+    let (html, pictures) = take_pictures(html, images, remote_images);
+    let clean = sanitize_for_display(&html, remote_images);
     let converter = htmd::HtmlToMarkdown::builder()
         .options(htmd::options::Options { br_style: htmd::options::BrStyle::Backslash, ..Default::default() })
         .build();
@@ -329,7 +343,238 @@ pub fn to_display_markdown(html: &str, remote_images: bool) -> String {
         out.push_str(line);
         out.push('\n');
     }
-    out.trim().to_string()
+    let mut out = unwrap_picture_links(out.trim());
+    for (n, picture) in pictures.iter().enumerate() {
+        out = out.replace(&format!("{PICTURE}{n}Z"), picture);
+    }
+    out
+}
+
+/// Pictures wider than this many pixels are shown scaled down.
+const MAX_PICTURE_W: u32 = 560;
+/// Stands in for a picture while the HTML is cleaned and converted, as `JMPICTURE{n}Z`: letters
+/// and digits only, so nothing on the way escapes or drops it.
+const PICTURE: &str = "JMPICTURE";
+
+/// Content ids of the pictures the HTML embeds (`<img src="cid:…">`), to fetch them.
+pub fn content_ids(html: &str) -> Vec<String> {
+    let lower = html.to_ascii_lowercase();
+    let mut ids = Vec::new();
+    for (start, end) in img_tags(&lower) {
+        let Some((s, e)) = attr_value(&lower, start, end, "src") else { continue };
+        if let Some(id) = html[s..e].trim().get(4..).filter(|_| lower[s..e].trim().starts_with("cid:")) {
+            let id = content_id(id);
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    ids
+}
+
+/// A content id as attachments carry it: without `<>`, `%40` back to `@`.
+pub fn content_id(raw: &str) -> String {
+    raw.trim().trim_start_matches('<').trim_end_matches('>').replace("%40", "@")
+}
+
+/// Take out the pictures that can be shown and put a placeholder word in their place: embedded
+/// ones (`cid:` found in `images`, `data:`) always, remote ones when allowed. Each needs a size,
+/// from its attributes or its bytes; ones without stay for the sanitizer, tracking pixels go.
+/// Returns the HTML and, per placeholder, the `<img>` to put back after conversion.
+fn take_pictures(html: &str, images: &[InlineImage], remote: bool) -> (String, Vec<String>) {
+    use base64::Engine as _;
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len());
+    let mut pictures = Vec::new();
+    let mut copied = 0;
+    for (start, end) in img_tags(&lower) {
+        let Some((s, e)) = attr_value(&lower, start, end, "src") else { continue };
+        let (value, kind) = (html[s..e].trim(), lower[s..e].trim());
+        let (src, natural) = if kind.starts_with("cid:") {
+            let id = content_id(&value[4..]);
+            let image = images.iter().find(|i| i.content_id.eq_ignore_ascii_case(&id));
+            let Some((image, mime)) = image.and_then(|i| Some((i, image_type(&i.bytes)?))) else {
+                // not fetched, or not a picture: nothing could show it
+                out.push_str(&html[copied..start]);
+                copied = (end + 1).min(html.len());
+                continue;
+            };
+            let data = base64::engine::general_purpose::STANDARD.encode(&image.bytes);
+            (format!("data:{mime};base64,{data}"), image_size(&image.bytes))
+        } else if kind.starts_with("data:image/") {
+            let bytes = value.split_once(',').and_then(|(_, data)| decode_base64(data));
+            (value.chars().filter(|c| !c.is_whitespace()).collect(), bytes.and_then(|b| image_size(&b)))
+        } else if remote && (kind.starts_with("https://") || kind.starts_with("http://")) {
+            (value.to_string(), None)
+        } else {
+            continue;
+        };
+        let attr = |name| {
+            let (s, e) = attr_value(&lower, start, end, name)?;
+            lower[s..e].trim().trim_end_matches("px").parse::<u32>().ok().filter(|v| *v > 0)
+        };
+        let size = match (attr("width"), attr("height"), natural) {
+            (Some(w), Some(h), _) => (w, h),
+            (Some(w), None, Some((nw, nh))) => (w, w * nh / nw),
+            (None, Some(h), Some((nw, nh))) => (h * nw / nh, h),
+            (None, None, Some(natural)) => natural,
+            _ => continue,
+        };
+        if src.contains('"') {
+            continue;
+        }
+        out.push_str(&html[copied..start]);
+        copied = (end + 1).min(html.len());
+        let (w, h) = size;
+        if w <= 2 || h <= 2 {
+            continue;
+        }
+        let (w, h) = if w > MAX_PICTURE_W { (MAX_PICTURE_W, (h * MAX_PICTURE_W / w).max(1)) } else { (w, h) };
+        out.push_str(&format!("{PICTURE}{}Z", pictures.len()));
+        pictures.push(format!("<img src=\"{src}\" width=\"{w}\" height=\"{h}\">"));
+    }
+    out.push_str(&html[copied..]);
+    (out, pictures)
+}
+
+/// Links in converted Markdown whose text is only space go (a linked picture that could not be
+/// shown leaves one behind, an underlined blank); a link around just a picture becomes the
+/// picture, so it shows as one.
+fn unwrap_picture_links(md: &str) -> String {
+    let mut out = String::with_capacity(md.len());
+    let mut rest = md;
+    while let Some(open) = rest.find('[') {
+        let after = &rest[open + 1..];
+        let link = after.find("](").and_then(|mid| {
+            let text = &after[..mid];
+            let close = mid + 2 + after[mid + 2..].find(')')?;
+            (!text.contains(['[', ']', '\n'])).then_some((text, close))
+        });
+        // `![alt](src)` is an image, not a link
+        let (Some((text, close)), false) = (link, rest[..open].ends_with('!')) else {
+            out.push_str(&rest[..open + 1]);
+            rest = after;
+            continue;
+        };
+        let bare = text.trim_matches(|c: char| c.is_whitespace() || c == '\u{a0}');
+        let is_picture = bare.strip_prefix(PICTURE).and_then(|n| n.strip_suffix('Z')).is_some_and(|n| n.parse::<usize>().is_ok());
+        if bare.is_empty() || is_picture {
+            out.push_str(&rest[..open]);
+            out.push_str(text);
+        } else {
+            out.push_str(&rest[..open + 1 + close + 1]);
+        }
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// MIME type of a picture, from its first bytes.
+pub fn image_type(bytes: &[u8]) -> Option<&'static str> {
+    match bytes {
+        [0x89, b'P', b'N', b'G', ..] => Some("image/png"),
+        [0xFF, 0xD8, 0xFF, ..] => Some("image/jpeg"),
+        [b'G', b'I', b'F', b'8', ..] => Some("image/gif"),
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some("image/webp"),
+        _ => None,
+    }
+}
+
+/// Width and height of a PNG, GIF or JPEG, from its header.
+pub fn image_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    let be16 = |i: usize| Some(u16::from_be_bytes(bytes.get(i..i + 2)?.try_into().ok()?) as u32);
+    let size = match image_type(bytes)? {
+        "image/png" => {
+            let be32 = |i: usize| Some(u32::from_be_bytes(bytes.get(i..i + 4)?.try_into().ok()?));
+            (be32(16)?, be32(20)?)
+        }
+        "image/gif" => {
+            let le16 = |i: usize| Some(u16::from_le_bytes(bytes.get(i..i + 2)?.try_into().ok()?) as u32);
+            (le16(6)?, le16(8)?)
+        }
+        "image/jpeg" => {
+            // walk the segments up to a start-of-frame marker, which holds height and width
+            let mut i = 2;
+            loop {
+                let (&0xFF, &marker) = (bytes.get(i)?, bytes.get(i + 1)?) else { return None };
+                if matches!(marker, 0xC0..=0xCF) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
+                    break (be16(i + 7)?, be16(i + 5)?);
+                }
+                i += 2 + be16(i + 2)? as usize;
+            }
+        }
+        _ => return None,
+    };
+    (size.0 > 0 && size.1 > 0).then_some(size)
+}
+
+/// Table rows of short cells side by side (a signature's "Phone | +41 …", a footer's links) stay
+/// one line: their cells are joined with a wide space, the paragraphs inside them dropped. Rows
+/// with a long text, a line break or a block in a cell are left to [`flatten_layout_tables`].
+/// Expects normalized HTML (ammonia output).
+fn join_short_rows(html: &str) -> String {
+    const BLOCKS: [&str; 10] = ["<br", "<table", "<ul", "<ol", "<li", "<h1", "<h2", "<h3", "<h4", "<blockquote"];
+    let mut out = String::with_capacity(html.len());
+    let mut cursor = 0;
+    while let Some(close) = html[cursor..].find("</tr>").map(|i| cursor + i) {
+        let end = close + "</tr>".len();
+        // the innermost row: the last `<tr` before its end
+        let row = html[cursor..close].rfind("<tr").map(|i| cursor + i).filter(|&s| {
+            matches!(html.as_bytes().get(s + 3), Some(b'>' | b' ')) && !html[s..close].contains("<table")
+        });
+        let Some(start) = row else {
+            out.push_str(&html[cursor..end]);
+            cursor = end;
+            continue;
+        };
+        let cells: Vec<&str> = cells(&html[start..close]).into_iter().filter(|c| !html_to_text(c).is_empty() || c.contains(PICTURE)).collect();
+        let short = cells.len() >= 2
+            && cells.iter().all(|c| html_to_text(c).chars().count() <= 60 && !BLOCKS.iter().any(|b| c.contains(b)));
+        out.push_str(&html[cursor..start]);
+        if short {
+            let joined: Vec<String> = cells.iter().map(|c| drop_tags(c, &["p", "div"])).collect();
+            out.push_str(&format!("<tr><td>{}</td></tr>", joined.join("\u{2003}")));
+        } else {
+            out.push_str(&html[start..end]);
+        }
+        cursor = end;
+    }
+    out.push_str(&html[cursor..]);
+    out
+}
+
+/// The inner HTML of each `<td>`/`<th>` in a row without nested tables.
+fn cells(row: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = row;
+    while let Some(open) = [rest.find("<td"), rest.find("<th")].into_iter().flatten().min() {
+        let Some(inner) = rest[open..].find('>').map(|i| open + i + 1) else { break };
+        let close = rest[inner..].find("</t").map_or(rest.len(), |i| inner + i);
+        out.push(&rest[inner..close]);
+        rest = rest.get(close + 3..).unwrap_or("");
+    }
+    out
+}
+
+/// The HTML without the tags called `names` (their content stays).
+fn drop_tags(html: &str, names: &[&str]) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(lt) = rest.find('<') {
+        out.push_str(&rest[..lt]);
+        let tail = &rest[lt + 1..];
+        let name: String = tail.trim_start_matches('/').chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        match tail.find('>') {
+            Some(gt) if names.contains(&name.as_str()) => rest = &tail[gt + 1..],
+            _ => {
+                out.push('<');
+                rest = tail;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Most tables in mail are layout scaffolding (newsletters nest them five deep). Shown as tables
@@ -469,7 +714,7 @@ mod tests {
         let clean = sanitize_for_display(html, false);
         assert!(!clean.contains("<table") && !clean.contains("<td"));
         assert!(clean.contains("<p>Hallo</p><p>Welt <b>fett</b></p>"));
-        assert!(clean.contains("Zeile<br>Zelle<br>"));
+        assert!(clean.contains("Zeile\u{2003}Zelle<br>"), "{clean}");
         assert!(!clean.contains("</p><br>"));
     }
 
@@ -477,19 +722,72 @@ mod tests {
     fn display_markdown_keeps_paragraphs_breaks_and_links() {
         let html = "<table><tr><td><p>Hallo,</p><p>Text mit <a href=\"https://x.de\">Link</a> und <b>fett</b>.</p>\
                     <p>Danke!<br>Anna<br>Support</p></td></tr></table>";
-        let md = to_display_markdown(html, false);
+        let md = to_display_markdown(html, false, &[]);
         assert!(md.contains("Hallo,\n\nText mit [Link](https://x.de) und **fett**."), "{md}");
         assert!(md.contains("Danke!\\\nAnna\\\nSupport"), "{md}");
-        let trailing = to_display_markdown("<p>weiter.<br></p><p>Danke</p>", false);
+        let trailing = to_display_markdown("<p>weiter.<br></p><p>Danke</p>", false, &[]);
         assert_eq!(trailing, "weiter.\n\nDanke");
-        let indented = to_display_markdown("<div>This is a test<br>\n  <br></div>", false);
+        let indented = to_display_markdown("<div>This is a test<br>\n  <br></div>", false, &[]);
         assert_eq!(indented, "This is a test");
         // Outlook and Spark: a div per line, an empty div is an empty line
         let lines = "<div>Grüße<br>Marc</div><div>Roothirsch GmbH</div><div>Brockhäger Str. 188</div>\
                      <div><br></div><div>Neuer Absatz</div>";
         assert_eq!(
-            to_display_markdown(lines, false),
+            to_display_markdown(lines, false, &[]),
             "Grüße\\\nMarc\\\nRoothirsch GmbH\\\nBrockhäger Str. 188\n\nNeuer Absatz"
         );
+    }
+
+    /// A PNG header saying `w` × `h`.
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        bytes.extend(w.to_be_bytes());
+        bytes.extend(h.to_be_bytes());
+        bytes
+    }
+
+    #[test]
+    fn reads_picture_sizes() {
+        assert_eq!(image_size(&png(452, 100)), Some((452, 100)));
+        assert_eq!(image_size(b"GIF89a\x19\0\x17\0"), Some((25, 23)));
+        // SOI, an APP0 segment of 4 bytes, then SOF0 with height 50 and width 226
+        let jpeg = b"\xFF\xD8\xFF\xE0\0\x04ab\xFF\xC0\0\x11\x08\0\x32\0\xE2";
+        assert_eq!((image_type(jpeg), image_size(jpeg)), (Some("image/jpeg"), Some((226, 50))));
+        assert_eq!(image_size(b"not a picture"), None);
+    }
+
+    #[test]
+    fn embedded_pictures_show_with_their_size() {
+        let logo = InlineImage {
+            content_id: "image001.png@01DD".into(),
+            name: "image001.png".into(),
+            content_type: "application/octet-stream".into(),
+            bytes: png(452, 100),
+        };
+        let html = "<p><img width=\"226\" height=\"50\" src=\"cid:image001.png@01DD\" alt=\"Logo\"></p>\
+                    <p><a href=\"https://linkedin.example\"><img src=\"cid:image001.png%4001DD\" width=\"25\"></a>\
+                    <a href=\"https://gone.example\"><img src=\"cid:missing\" width=\"25\">&nbsp;</a></p>\
+                    <p>Text<img src=\"https://t.example/p.gif\" width=\"1\" height=\"1\"></p>";
+        let md = to_display_markdown(html, true, &[logo]);
+        assert!(md.starts_with("<img src=\"data:image/png;base64,iVBORw0KGgo"), "{md}");
+        assert!(md.contains("width=\"226\" height=\"50\">\n\n<img"), "{md}");
+        // the linked one keeps its aspect ratio and loses the link; the missing one leaves nothing
+        assert!(md.contains("width=\"25\" height=\"5\">"), "{md}");
+        assert!(!md.contains("](") && !md.contains("gone.example") && !md.contains("t.example"), "{md}");
+        // without the bytes nothing is shown, remote pictures not unless allowed
+        assert!(!to_display_markdown(html, false, &[]).contains("<img"));
+        assert_eq!(content_ids(html), ["image001.png@01DD", "missing"]);
+    }
+
+    #[test]
+    fn short_table_rows_stay_one_line() {
+        // an Outlook signature: a label and a value per row, each in its own paragraph
+        let html = "<table><tr><td><p><b>Anna Muster</b><br>Projektmanager</p></td></tr>\
+                    <tr><td><table><tr><td><p><b>Telefon</b></p></td><td><p>+1 555 0100</p></td></tr>\
+                    <tr><td><p><b>Web</b></p></td><td><p><a href=\"https://x.example\">x.example</a></p></td></tr>\
+                    </table></td></tr></table><p>Eine lange Zeile, die nicht zusammengezogen wird</p>";
+        let md = to_display_markdown(html, false, &[]);
+        assert!(md.contains("**Telefon**\u{2003}+1 555 0100\\\n**Web**\u{2003}[x.example](https://x.example)"), "{md}");
+        assert!(md.contains("**Anna Muster**\\\nProjektmanager"), "{md}");
     }
 }

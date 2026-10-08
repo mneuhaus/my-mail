@@ -6,6 +6,7 @@
 // changes.
 // The bearer token picks the mailbox ("demo-alex" or "demo-billing"). Nothing leaves localhost.
 import http from "node:http";
+import { readFileSync } from "node:fs";
 
 const port = Number(process.argv[2] || 7357);
 const base = `http://127.0.0.1:${port}/v1.0`;
@@ -42,6 +43,12 @@ const message = (folderId, minutes, from, subject, html, extra = {}) => ({
   attachments: [],
   ...extra,
 });
+// Tom's Outlook signature: a logo embedded as an inline attachment (cid:) and a label/value table
+const logo = readFileSync(new URL("./becker-logo.png", import.meta.url));
+const beckerSignature = `<table><tr><td><p><img width="200" height="40" src="cid:image001.png@becker" alt="Becker &amp; Sons"></p></td></tr>
+<tr><td><p><b>Tom Becker</b><br>Project lead</p></td></tr>
+<tr><td><table><tr><td><p><b>Phone</b></p></td><td><p>+1 555 0100</p></td></tr>
+<tr><td><p><b>Web</b></p></td><td><p><a href="https://beckerandsons.example">beckerandsons.example</a></p></td></tr></table></td></tr></table>`;
 const pdf = (name, size) => ({
   "@odata.type": "#microsoft.graph.fileAttachment", id: `att-${name}`, name, contentType: "application/pdf", size, isInline: false,
 });
@@ -67,8 +74,10 @@ const alex = {
       lines("Hi Alex,", "", "attached are the notes from this morning. The short version: we start with the booking flow, design reviews every Tuesday, first prototype by the 24th.", "", "Could you check the timeline on page 2?", "", "Thanks, Lena"),
       { flag: { flagStatus: "flagged" }, hasAttachments: true, attachments: [pdf("harbor-kickoff-notes.pdf", 284_000)], isRead: false }),
     message("f-inbox", 47, person("Tom Becker", "tom@beckerandsons.example"), "Re: Quote for the website relaunch",
-      `<div>Hi Alex,</div><div><br></div><div>thanks for the quick turnaround. The quote looks good to us, two things before we sign:</div><ul><li><b>Hosting:</b> can the first year be part of the package?</li><li><b>Content migration:</b> we have about 40 product pages, is that covered?</li></ul><div>If both are fine, we would like to start on <b>November 3</b>. The signed order form follows as soon as you confirm.</div><div><br></div><div>Our brand guide is here: <a href="https://beckerandsons.example/brand">beckerandsons.example/brand</a></div><div><br></div><div>Best regards</div><div>Tom Becker</div><div>Becker &amp; Sons</div>`,
-      { flag: { flagStatus: "flagged" }, hasAttachments: true, attachments: [pdf("quote-relaunch-v2.pdf", 142_000)], conversationId: "conv-quote" }),
+      `<div>Hi Alex,</div><div><br></div><div>thanks for the quick turnaround. The quote looks good to us, two things before we sign:</div><ul><li><b>Hosting:</b> can the first year be part of the package?</li><li><b>Content migration:</b> we have about 40 product pages, is that covered?</li></ul><div>If both are fine, we would like to start on <b>November 3</b>. The signed order form follows as soon as you confirm.</div><div><br></div><div>Our brand guide is here: <a href="https://beckerandsons.example/brand">beckerandsons.example/brand</a></div><div><br></div><div>Best regards</div>${beckerSignature}`,
+      { flag: { flagStatus: "flagged" }, hasAttachments: true, conversationId: "conv-quote",
+        attachments: [pdf("quote-relaunch-v2.pdf", 142_000), { "@odata.type": "#microsoft.graph.fileAttachment", id: "att-logo",
+          name: "image001.png", contentType: "image/png", size: logo.length, isInline: true, contentId: "image001.png@becker", bytes: logo }] }),
     message("f-inbox", 95, person("Maria Lopez", "maria@lopez.example"), "Lunch on Thursday?",
       lines("Hey Alex,", "", "are you around on Thursday? The new place next to the station opened, I would love to try it.", "", "Maria"), { isRead: false }),
     message("f-inbox", 180, person("Paperclip Print Shop", "orders@paperclip.example"), "Your order #4821 has shipped",
@@ -212,7 +221,13 @@ const server = http.createServer((req, res) => {
       box.messages.splice(box.messages.indexOf(m), 1);
       return send(res, 204);
     }
-    if (parts[3] === "attachments" && req.method === "GET") return send(res, 200, { value: m.attachments });
+    if (parts[3] === "attachments" && parts[5] === "$value") {
+      const a = m.attachments.find((x) => x.id === parts[4]);
+      if (!a) return send(res, 404, { error: { code: "ErrorItemNotFound", message: "not found" } });
+      res.writeHead(200, { "content-type": a.contentType });
+      return res.end(a.bytes || `(demo content of ${a.name})`);
+    }
+    if (parts[3] === "attachments" && req.method === "GET") return send(res, 200, { value: m.attachments.map(({ bytes, ...a }) => a) });
     if (parts[3] === "attachments" && req.method === "POST") {
       const a = { ...body, id: `att-${Date.now()}`, size: body.contentBytes ? body.contentBytes.length : 0 };
       m.attachments.push(a);
