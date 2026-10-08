@@ -62,12 +62,15 @@ impl MailApp {
             .items_center()
             .window_control_area(WindowControlArea::Drag)
             .child(
-                v_flex()
+                // one line, centred on the traffic lights and the toolbar next door
+                h_flex()
                     .flex_1()
                     .min_w_0()
-                    .child(div().text_base().font_weight(FontWeight::SEMIBOLD).truncate().child(self.view_title()))
+                    .gap_2()
+                    .items_baseline()
+                    .child(div().flex_none().text_base().font_weight(FontWeight::SEMIBOLD).child(self.view_title()))
                     .when_some(self.view_subtitle(), |d, s| {
-                        d.child(div().text_xs().text_color(theme.muted_foreground).truncate().child(s))
+                        d.child(div().flex_1().min_w_0().text_xs().text_color(theme.muted_foreground).truncate().child(s))
                     }),
             )
             .when(self.loading, |d| {
