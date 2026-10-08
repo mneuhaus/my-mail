@@ -17,6 +17,12 @@ use crate::html;
 use crate::model::*;
 
 const GRAPH: &str = "https://graph.microsoft.com/v1.0";
+
+/// Graph endpoint; `JUST_MAIL_GRAPH_URL` points everything at another server (the demo in
+/// `tools/demo`, tests).
+fn graph_base() -> String {
+    std::env::var("JUST_MAIL_GRAPH_URL").unwrap_or_else(|_| GRAPH.to_string())
+}
 const PREFER_IDS: &str = "IdType=\"ImmutableId\"";
 const PREFER_HTML: &str = "IdType=\"ImmutableId\", outlook.body-content-type=\"html\"";
 /// Graph rejects requests above ~4 MB; base64 adds a third.
@@ -36,7 +42,7 @@ fn agent() -> ureq::Agent {
 /// Who is signed in, asked with a bare access token (used right after sign-in).
 pub fn fetch_me(access_token: &str) -> Result<Me> {
     agent()
-        .get(&format!("{GRAPH}/me?$select=displayName,mail,userPrincipalName"))
+        .get(&format!("{}/me?$select=displayName,mail,userPrincipalName", graph_base()))
         .set("Authorization", &format!("Bearer {access_token}"))
         .call()
         .map_err(transport_error)?
@@ -142,7 +148,11 @@ impl Mailbox {
 
     /// Send one request; refreshes the token once on 401 and waits out throttling.
     fn call(&self, method: &str, url: &str, prefer: &str, body: Option<&Value>) -> Result<ureq::Response> {
-        let url = if url.starts_with("https://") { url.to_string() } else { format!("{GRAPH}{url}") };
+        let url = if url.starts_with("https://") || url.starts_with("http://") {
+            url.to_string()
+        } else {
+            format!("{}{url}", graph_base())
+        };
         let mut refreshed = false;
         let mut attempts = 0;
         loop {

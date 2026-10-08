@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Just Mail · Microsoft 365 mail without the noise</title>
+<meta name="description" content="Just Mail is a small, fast Microsoft 365 mail client for macOS, written in Rust, with a command line tool for agents that can write drafts but never send.">
+<meta property="og:title" content="Just Mail">
+<meta property="og:description" content="Microsoft 365 mail without the noise: a native Rust app for macOS plus a drafts-only command line for agents.">
+<meta property="og:image" content="https://mneuhaus.github.io/my-mail/screenshot-dark.png">
+<link rel="icon" type="image/png" href="icon.png">
+<style>
+:root {
+  --bg: #1c1c1e; --surface: #232326; --raised: #2a2b2f; --line: #2f3034; --text: #ececee; --muted: #9a9ca3;
+  --blue: #3b82f6; --blue-hover: #5390f7; --on-blue: #ffffff; --pin: #ff7a45; --green: #34c759; --amber: #ffb340;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f5f5f7; --surface: #ffffff; --raised: #ffffff; --line: #e2e2e8; --text: #1d1d1f; --muted: #6e6e73;
+    --blue: #2f6fe4; --blue-hover: #3b7bf0; --pin: #f05a1a; --green: #28a745; --amber: #e08600;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 400 18px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+a { color: inherit; }
+code, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: .88em; }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+header { display: flex; align-items: center; gap: 12px; padding: 22px 0; }
+header img { width: 36px; height: 36px; }
+header .name { font-weight: 700; font-size: 20px; letter-spacing: -.01em; }
+header nav { margin-left: auto; display: flex; gap: 22px; font-weight: 600; font-size: 15px; }
+header nav a { text-decoration: none; color: var(--muted); }
+header nav a:hover { color: var(--text); }
+
+.hero { padding: 48px 0 32px; display: grid; gap: 24px; }
+.hero h1 { margin: 0; font-size: clamp(40px, 6.5vw, 72px); line-height: 1.02; letter-spacing: -.035em; max-width: 15ch; }
+.hero h1 em { font-style: normal; color: var(--blue); }
+.hero p { margin: 0; max-width: 60ch; font-size: 20px; color: var(--muted); }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.btn { display: inline-flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 600; font-size: 16px;
+  padding: 12px 20px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); }
+.btn:hover { background: var(--raised); }
+.btn.primary { background: var(--blue); border-color: var(--blue); color: var(--on-blue); }
+.btn.primary:hover { background: var(--blue-hover); }
+.btn svg { width: 18px; height: 18px; }
+.fine { font-size: 14px; color: var(--muted); }
+
+.shot img { display: block; width: 100%; height: auto; border-radius: 14px; border: 1px solid var(--line);
+  box-shadow: 0 30px 80px -24px rgba(0,0,0,.5); }
+
+section { padding: 72px 0 8px; }
+h2 { font-size: 36px; line-height: 1.1; letter-spacing: -.02em; margin: 0 0 10px; }
+.lead { color: var(--muted); margin: 0 0 30px; max-width: 64ch; }
+
+.features { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+.feature { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 22px; }
+.feature h3 { margin: 0 0 6px; font-size: 18px; display: flex; align-items: center; gap: 10px; }
+.feature p { margin: 0; color: var(--muted); font-size: 16px; }
+.dot { width: 28px; height: 28px; border-radius: 8px; display: inline-grid; place-items: center; flex: none; background: var(--raised); border: 1px solid var(--line); }
+.dot svg { width: 16px; height: 16px; }
+
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; align-items: center; }
+@media (max-width: 860px) { .split { grid-template-columns: 1fr; } }
+
+pre { margin: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 20px 22px;
+  overflow-x: auto; line-height: 1.7; }
+pre .c { color: var(--muted); }
+.callout { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 22px 24px; }
+.callout strong { color: var(--text); }
+.callout p { margin: 0 0 10px; color: var(--muted); }
+.callout p:last-child { margin: 0; }
+ol.steps { margin: 0; padding-left: 22px; color: var(--muted); }
+ol.steps li { margin: 6px 0; }
+ol.steps code { color: var(--text); }
+
+footer { padding: 72px 0 48px; color: var(--muted); font-size: 14px; display: flex; flex-wrap: wrap; gap: 8px 18px; }
+footer a { color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <img src="icon.png" alt="">
+    <span class="name">Just Mail</span>
+    <nav>
+      <a href="#features">Features</a>
+      <a href="#agents">For agents</a>
+      <a href="#build">Build</a>
+      <a href="https://github.com/mneuhaus/my-mail">GitHub</a>
+    </nav>
+  </header>
+
+  <div class="hero">
+    <h1>Microsoft 365 mail, <em>without the noise.</em></h1>
+    <p>A small native mail client for macOS, written in Rust. It reads your Microsoft 365 mailboxes,
+      lets you pin what still needs doing, and writes clean HTML mail with your signature.
+      Its command line lets agents read mail and prepare drafts; sending stays with you.</p>
+    <div class="actions">
+      <a class="btn primary" href="https://github.com/mneuhaus/my-mail">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        Source on GitHub
+      </a>
+      <a class="btn" href="#build">Build it</a>
+      <span class="fine">macOS · Microsoft 365 · MIT license</span>
+    </div>
+  </div>
+
+  <div class="shot">
+    <picture>
+      <source srcset="screenshot-light.png" media="(prefers-color-scheme: light)">
+      <img src="screenshot-dark.png" width="2400" height="1519" alt="Just Mail: accounts and folders on the left, the inbox with two pinned mails on top, an open mail on the right">
+    </picture>
+  </div>
+
+  <section id="features">
+    <h2>Everything a mailbox needs, nothing more</h2>
+    <p class="lead">Three columns, one blue for what matters, and every mail exactly where Outlook and your phone
+      expect it: Just Mail talks to Microsoft Graph and keeps all state on the server.</p>
+    <div class="features">
+      <div class="feature">
+        <h3><span class="dot"><svg viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></svg></span>Several accounts</h3>
+        <p>Each with its own folders, colour and signature. Mark an account read-only and Just Mail will never mark,
+          move or draft anything there, handy for mailboxes another system processes.</p>
+      </div>
+      <div class="feature">
+        <h3><span class="dot"><svg viewBox="0 0 24 24" fill="none" stroke="var(--pin)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg></span>Pin what needs doing</h3>
+        <p>Pinned mail sits on top of the inbox and is the Outlook follow-up flag underneath, so Outlook,
+          Spark and your phone agree. One view collects pinned mail of all accounts.</p>
+      </div>
+      <div class="feature">
+        <h3><span class="dot"><svg viewBox="0 0 24 24" fill="none" stroke="var(--amber)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.38 3.62a1 1 0 0 1 3 3L7.37 18.64a2 2 0 0 1-.86.5l-2.87.84a.5.5 0 0 1-.62-.62l.84-2.87a2 2 0 0 1 .5-.86z"/></svg></span>Real replies, clean HTML</h3>
+        <p>Replies land in the conversation above the quote, as one tidy HTML block Outlook renders well.
+          Your text stays editable; the signature and quote are never touched.</p>
+      </div>
+      <div class="feature">
+        <h3><span class="dot"><svg viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>Your signatures</h3>
+        <p>A long one for new mail and a short one for replies, imported from Spark if you used it, logo included
+          as an inline image so it shows up everywhere.</p>
+      </div>
+      <div class="feature">
+        <h3><span class="dot"><svg viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span>Quiet by default</h3>
+        <p>Newsletters are turned into readable text, scripts never run and remote images (mostly tracking
+          pixels) stay blocked until you ask for them.</p>
+      </div>
+      <div class="feature">
+        <h3><span class="dot"><svg viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg></span>Native and light</h3>
+        <p>Rust and GPUI, no web view. About 75 MB of memory and next to no CPU while it waits for mail.
+          Keyboard first: <code>j</code>/<code>k</code>, <code>r</code>, <code>e</code>, <code>s</code>, <code>/</code>.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="agents">
+    <div class="split">
+      <div>
+        <h2>An inbox your agents can work with</h2>
+        <p class="lead">The <code>jm</code> command shares accounts with the app. It lists, searches and reads mail,
+          downloads attachments, pins and files, and writes drafts with your signature. A running app shows a new
+          draft at once, and <code>jm open</code> puts a mail in front of you.</p>
+        <div class="callout">
+          <p><strong>Agents draft, you send.</strong> <code>jm</code> and its MCP server are built without the
+            code that sends mail, so no prompt and no setting can make them send. You review the draft in Just Mail
+            and press send, which asks once more.</p>
+          <p>Every command speaks JSON (<code>--json</code>), uses short ids, and has stable exit codes.</p>
+        </div>
+      </div>
+      <pre><span class="c"># what came in today, and what is pinned</span>
+jm list --since today
+jm list --flagged
+
+<span class="c"># find and read</span>
+jm search invoice --attachments
+jm show a1b2c3d4
+
+<span class="c"># answer in the conversation, as a draft</span>
+jm drafts reply a1b2c3d4 --body-file answer.txt
+jm open a1b2c3d4
+
+<span class="c"># the same as tools for agents</span>
+jm mcp</pre>
+    </div>
+    <div class="shot" style="margin-top:32px">
+      <img src="screenshot-reply.png" width="2400" height="1519" alt="A reply draft in Just Mail: your text on top, the signature and the quoted mail follow below">
+    </div>
+  </section>
+
+  <section id="build">
+    <h2>Build it</h2>
+    <p class="lead">Just Mail is a personal project and comes as source for now. You need macOS 13 or later and a
+      Rust toolchain.</p>
+    <div class="split" style="align-items:start">
+      <pre>git clone https://github.com/mneuhaus/my-mail
+cd my-mail
+tools/bundle-macos.sh --install
+<span class="c"># → /Applications/Just Mail.app and ~/bin/jm</span></pre>
+      <ol class="steps">
+        <li>Open Just Mail and choose <strong>Sign in with Microsoft</strong>: the app shows a code and opens
+          Microsoft's sign-in page.</li>
+        <li>Add a second account the same way; set read-only and signatures under <strong>Accounts &amp; signatures</strong>.</li>
+        <li>On the command line: <code>jm accounts</code>, then <code>jm --help</code>.</li>
+        <li>Try it without an account: <code>tools/demo/run.sh</code> starts the app on the made-up mailbox
+          these screenshots show.</li>
+      </ol>
+    </div>
+  </section>
+
+  <footer>
+    <span>Just Mail by <a href="https://github.com/mneuhaus">Marc Neuhaus</a></span>
+    <span>MIT license</span>
+    <span>Uses Microsoft Graph; not affiliated with Microsoft</span>
+  </footer>
+</div>
+</body>
+</html>

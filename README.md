@@ -62,6 +62,10 @@ swift tools/make-icon.swift      # redraw the icon
 
 Crates: `jm-core` (accounts, sign-in, Graph, draft HTML), `jm-cli` (`jm`), `jm-app` (GPUI).
 
+Try the app without an account: `tools/demo/run.sh` starts it on a made-up mailbox (a small local
+stand-in for Graph, `tools/demo/server.mjs`); `tools/demo/screenshots.sh` makes the pictures for the
+page in `docs/` (GitHub Pages).
+
 This repo is public. After cloning, turn on the checks that keep secrets and local files out of
 commits and pushes (they use [gitleaks](https://github.com/gitleaks/gitleaks), `brew install gitleaks`):
 
