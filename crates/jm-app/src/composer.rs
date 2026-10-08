@@ -473,6 +473,20 @@ impl Composer {
         });
     }
 
+    /// First lines of the signature as one line, for the hint under the text.
+    fn signature_line(&self) -> Option<String> {
+        let block = self.mailbox.account.signature_block()?;
+        let text = html::html_to_text(&block);
+        let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).take(3).collect();
+        (!lines.is_empty()).then(|| lines.join("  ·  "))
+    }
+
+    /// A reply or forward (its quote sits below the signature).
+    fn is_answer(&self, cx: &App) -> bool {
+        let subject = Self::value(&self.subject, cx).to_lowercase();
+        ["re:", "aw:", "fw:", "fwd:", "wg:", "antw:"].iter().any(|p| subject.starts_with(p))
+    }
+
     fn status(&self) -> String {
         if self.sending {
             tr!("Sending…", "Wird gesendet…").into()
@@ -639,19 +653,29 @@ impl Render for Composer {
                     .py_2()
                     .child(Textarea::new(&self.body).appearance(false).h_full()),
             )
-            .when(self.has_markers && !self.mailbox.account.signature.trim().is_empty(), |d| {
+            .when_some(self.signature_line().filter(|_| self.has_markers), |d, line| {
+                let quoted = self.is_answer(cx);
                 d.child(
-                    div()
+                    v_flex()
                         .px_5()
-                        .py_1p5()
+                        .py_2()
+                        .gap_0p5()
                         .border_t_1()
                         .border_color(theme.border.opacity(0.6))
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child(tr!(
-                            "Your signature (and the quoted mail) follow below the text.",
-                            "Deine Signatur (und die zitierte E-Mail) folgen unter dem Text."
-                        )),
+                        .child(
+                            h_flex()
+                                .gap_1p5()
+                                .child(div().flex_none().font_weight(FontWeight::MEDIUM).child(tr!("Signature", "Signatur")))
+                                .child(div().flex_1().min_w_0().truncate().child(line)),
+                        )
+                        .when(quoted, |d| {
+                            d.child(tr!(
+                                "The quoted mail follows below the signature.",
+                                "Darunter folgt die zitierte E-Mail."
+                            ))
+                        }),
                 )
             })
     }

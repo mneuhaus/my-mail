@@ -192,6 +192,7 @@ impl MailApp {
         });
 
         let body_id = SharedString::from(format!("body-{}-{}", m.id, opened.images_loaded));
+        let card = crate::theme::extra(cx).card;
         let body = TextView::markdown(ElementId::Name(body_id), opened.html.clone()).selectable(true);
 
         v_flex()
@@ -204,8 +205,19 @@ impl MailApp {
                         .child(header)
                         .children(attachments)
                         .children(images_banner)
-                        .child(div().h(px(1.)).mx_6().bg(theme.border))
-                        .child(div().px_6().py_5().text_sm().child(body)),
+                        .child(
+                            div()
+                                .mx_6()
+                                .mb_6()
+                                .px_6()
+                                .py_5()
+                                .rounded(px(10.))
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(card)
+                                .text_sm()
+                                .child(body),
+                        ),
                 ),
             )
     }

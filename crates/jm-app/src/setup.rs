@@ -6,6 +6,7 @@ use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::switch::Switch;
+use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -32,6 +33,8 @@ pub struct Setup {
     config: Config,
     signatures: Vec<(String, Entity<TextareaState>)>,
     imports: Vec<Ms365Login>,
+    /// Spark signatures bound to an address (offered for import).
+    spark_signatures: usize,
     login: Login,
     busy: bool,
     message: Option<String>,
@@ -44,6 +47,7 @@ impl Setup {
             config: Config::default(),
             signatures: Vec::new(),
             imports: Vec::new(),
+            spark_signatures: 0,
             login: Login::Idle,
             busy: false,
             message: None,
@@ -70,6 +74,7 @@ impl Setup {
                 (a.id.clone(), state)
             })
             .collect();
+        self.spark_signatures = jm_core::spark::find_signatures().map(|s| s.iter().filter(|s| s.email.is_some()).count()).unwrap_or(0);
         let known: Vec<String> = self.config.accounts.iter().map(|a| a.email.to_lowercase()).collect();
         self.imports = auth::find_ms365_logins(self.config.client_id())
             .into_iter()
@@ -197,6 +202,62 @@ impl Setup {
         cx.notify();
     }
 
+    /// Take the signatures Spark has bound to our accounts' addresses.
+    fn import_spark_signatures(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.busy = true;
+        self.error = None;
+        self.run(
+            window,
+            cx,
+            || {
+                let mut config = Config::load()?;
+                jm_core::spark::import_signatures(&mut config)
+            },
+            |this, result, window, cx| {
+                this.busy = false;
+                match result {
+                    Ok(ids) if ids.is_empty() => {
+                        this.message = Some(
+                            tr!(
+                                "Spark has no signature for these addresses.",
+                                "Spark hat für diese Adressen keine Signatur."
+                            )
+                            .into(),
+                        )
+                    }
+                    Ok(ids) => {
+                        this.message = Some(if i18n::german() {
+                            format!("Signatur aus Spark übernommen: {}", ids.join(", "))
+                        } else {
+                            format!("Took the Spark signature for {}", ids.join(", "))
+                        });
+                        this.reload(window, cx);
+                        cx.emit(SetupEvent::AccountsChanged);
+                    }
+                    Err(e) => this.error = Some(e.to_string()),
+                }
+            },
+        );
+    }
+
+    /// Go back to the plain text signature of an account.
+    fn drop_html_signature(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let result = Config::load().and_then(|mut config| {
+            if let Some(a) = config.accounts.iter_mut().find(|a| a.id == id) {
+                a.signature_html.clear();
+            }
+            config.save()
+        });
+        match result {
+            Ok(()) => {
+                self.reload(window, cx);
+                cx.emit(SetupEvent::AccountsChanged);
+            }
+            Err(e) => self.error = Some(e.to_string()),
+        }
+        cx.notify();
+    }
+
     fn remove(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         let Ok(mut config) = Config::load() else { return };
         config.accounts.retain(|a| a.id != id);
@@ -268,7 +329,37 @@ impl Render for Setup {
                                     .on_click(cx.listener(move |this, _, w, cx| this.remove(remove_id.clone(), w, cx))),
                             ),
                     )
-                    .when_some(signature, |d, s| {
+                    .when(!account.signature_html.trim().is_empty(), |d| {
+                        let html_id = account.id.clone();
+                        d.child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(div().flex_1().text_xs().text_color(theme.muted_foreground).child(tr!(
+                                    "Signature (HTML, from Spark)",
+                                    "Signatur (HTML, aus Spark)"
+                                )))
+                                .child(
+                                    Button::new(("as-text", ix))
+                                        .label(tr!("Use plain text instead", "Stattdessen Text verwenden"))
+                                        .ghost()
+                                        .xsmall()
+                                        .on_click(cx.listener(move |this, _, w, cx| this.drop_html_signature(html_id.clone(), w, cx))),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .p_3()
+                                .rounded(px(8.))
+                                .bg(theme.muted)
+                                .text_xs()
+                                .child(TextView::markdown(
+                                    ElementId::Name(SharedString::from(format!("sig-{}", account.id))),
+                                    jm_core::html::to_display_markdown(&account.signature_html, false),
+                                )),
+                        )
+                    })
+                    .when_some(signature.filter(|_| account.signature_html.trim().is_empty()), |d, s| {
                         d.child(div().text_xs().text_color(theme.muted_foreground).child(tr!("Signature", "Signatur")))
                             .child(Textarea::new(&s).small())
                     }),
@@ -378,7 +469,22 @@ impl Render for Setup {
                             d.child(div().mt_3().text_sm().text_color(theme.success).child(m))
                         })
                         .when_some(self.error.clone(), |d, e| d.child(div().mt_3().text_sm().text_color(theme.danger).child(e)))
-                        .when(has_accounts, |d| d.child(section(tr!("ACCOUNTS", "KONTEN"))).child(accounts))
+                        .when(has_accounts, |d| {
+                            d.child(section(tr!("ACCOUNTS", "KONTEN")))
+                                .when(self.spark_signatures > 0, |d| {
+                                    d.child(
+                                        h_flex().mb_3().child(
+                                            Button::new("spark-signatures")
+                                                .small()
+                                                .icon(IconName::Download)
+                                                .label(tr!("Take signatures from Spark", "Signaturen aus Spark übernehmen"))
+                                                .disabled(self.busy)
+                                                .on_click(cx.listener(|this, _, w, cx| this.import_spark_signatures(w, cx))),
+                                        ),
+                                    )
+                                })
+                                .child(accounts)
+                        })
                         .child(section(tr!("ADD ACCOUNT", "KONTO HINZUFÜGEN")))
                         .child(add)
                         .child(section(tr!("COMMAND LINE", "KOMMANDOZEILE")))

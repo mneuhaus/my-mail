@@ -12,6 +12,7 @@ mod list;
 mod reader;
 mod setup;
 mod sidebar;
+mod theme;
 mod util;
 
 use std::borrow::Cow;
@@ -22,7 +23,7 @@ use gpui_kit::*;
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
-        Mail, MailOpen, Send, Archive, Trash, Flag, FlagOff, Reply, ReplyAll, Forward, Paperclip, SquarePen, Lock,
+        Mail, MailOpen, Send, Archive, Trash, Flag, FlagOff, Reply, ReplyAll, Forward, Paperclip, SquarePen, Pencil, Lock,
         Image, Download, FolderInput, CircleCheckBig, Save, ListTodo, LogIn, KeyRound
     ]
 );
@@ -90,6 +91,7 @@ fn apply_theme(window: Option<&mut Window>, cx: &mut App) {
 fn main() {
     gpui_kit::application().with_assets(AppAssets).run(|cx| {
         gpui_kit::init(cx);
+        theme::register(cx);
         apply_theme(None, cx);
         menus(cx);
         actions::bind_keys(cx);

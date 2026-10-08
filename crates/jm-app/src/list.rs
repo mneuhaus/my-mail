@@ -4,7 +4,6 @@ use std::ops::Range;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
-use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -13,7 +12,7 @@ use gpui_kit::*;
 use crate::actions;
 use crate::app::{MailApp, View};
 use crate::sidebar::TOP_H;
-use crate::{tr, util};
+use crate::{theme, tr, util};
 
 pub const LIST_W: f32 = 380.;
 const ROW_H: f32 = 78.;
@@ -76,11 +75,22 @@ impl MailApp {
                 d.child(Icon::new(IconName::LoaderCircle).small().text_color(theme.muted_foreground))
             })
             .child(
-                gpui_kit::component::button::Button::new("compose")
-                    .icon(IconName::SquarePen)
-                    .ghost()
-                    .small()
-                    .tooltip(tr!("New message (⌘N)", "Neue E-Mail (⌘N)"))
+                // the one round blue button: write a mail
+                div()
+                    .id("compose")
+                    .size(px(30.))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(theme.primary)
+                    .hover(|s| s.bg(theme.primary_hover))
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(Icon::new(IconName::Pencil).small().text_color(theme.primary_foreground))
+                    .tooltip(|w, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(tr!("New message (⌘N)", "Neue E-Mail (⌘N)")).build(w, cx)
+                    })
                     .on_click(cx.listener(|this, _, w, cx| this.new_message(w, cx))),
             );
 
@@ -102,6 +112,7 @@ impl MailApp {
             .w(px(LIST_W))
             .flex_none()
             .h_full()
+            .bg(theme.colors.list)
             .border_r_1()
             .border_color(theme.border)
             .key_context(actions::LIST)
@@ -128,6 +139,7 @@ impl MailApp {
 
     fn render_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
+        let x = theme::extra(cx);
         let row = &self.rows[ix];
         let m = &row.message;
         let selected = self.selected.as_deref() == Some(m.id.as_str());
@@ -139,8 +151,10 @@ impl MailApp {
             m.sender()
         };
         let account_tag = (self.view == Some(View::Flagged) && self.accounts.len() > 1)
-            .then(|| self.accounts.get(row.account).map(|a| a.config.id.clone()))
+            .then(|| self.accounts.get(row.account).map(|a| (a.config.id.clone(), theme::account_color(row.account))))
             .flatten();
+        let (fg, muted) = if selected { (x.on_selected, x.on_selected_muted) } else { (theme.foreground, theme.muted_foreground) };
+        let date_color = if unread && !selected { theme.primary } else { muted };
         h_flex()
             .id(("row", ix))
             .h(px(ROW_H))
@@ -149,8 +163,9 @@ impl MailApp {
             .gap_2()
             .items_start()
             .border_b_1()
-            .border_color(theme.border.opacity(0.6))
+            .border_color(theme.border.opacity(0.5))
             .cursor_pointer()
+            .text_color(fg)
             .when(selected, |d| d.bg(theme.list_active))
             .when(!selected, |d| d.hover(|s| s.bg(theme.list_hover)))
             .on_click(cx.listener(move |this, _, window, cx| {
@@ -160,7 +175,7 @@ impl MailApp {
             .child(
                 // unread dot
                 div().pt(px(15.)).w(px(8.)).flex_none().child(
-                    div().size(px(7.)).rounded_full().when(unread, |d| d.bg(theme.primary)),
+                    div().size(px(8.)).rounded_full().when(unread, |d| d.bg(if selected { fg } else { theme.primary })),
                 ),
             )
             .child(
@@ -173,54 +188,59 @@ impl MailApp {
                         h_flex()
                             .gap_2()
                             .items_center()
+                            .when(m.is_draft, |d| {
+                                d.child(div().flex_none().text_sm().text_color(if selected { fg } else { x.drafts }).child(tr!(
+                                    "Draft",
+                                    "Entwurf"
+                                )))
+                            })
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
                                     .text_sm()
-                                    .when(unread, |d| d.font_weight(FontWeight::SEMIBOLD))
-                                    .when(m.is_draft, |d| d.text_color(theme.danger))
-                                    .child(if m.is_draft {
-                                        format!("{} {who}", tr!("Draft:", "Entwurf:"))
-                                    } else {
-                                        who
-                                    }),
+                                    .when(unread, |d| d.font_weight(FontWeight::BOLD))
+                                    .when(!unread, |d| d.font_weight(FontWeight::MEDIUM))
+                                    .child(who),
                             )
-                            .when(m.has_attachments, |d| {
-                                d.child(Icon::new(IconName::Paperclip).xsmall().text_color(theme.muted_foreground))
+                            .when(m.has_attachments, |d| d.child(Icon::new(IconName::Paperclip).xsmall().text_color(muted)))
+                            .when(m.is_flagged(), |d| {
+                                d.child(Icon::new(IconName::Flag).xsmall().text_color(if selected { fg } else { x.flagged }))
                             })
-                            .when(m.is_flagged(), |d| d.child(Icon::new(IconName::Flag).xsmall().text_color(theme.danger)))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(util::list_date(m.date())),
-                            ),
+                            .child(div().flex_none().text_xs().text_color(date_color).child(util::list_date(m.date()))),
                     )
                     .child(
                         h_flex()
                             .gap_1p5()
+                            .items_center()
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
                                     .text_sm()
-                                    
                                     .when(unread, |d| d.font_weight(FontWeight::MEDIUM))
                                     .child(m.subject().to_string()),
                             )
-                            .when_some(account_tag, |d, tag| {
-                                d.child(div().flex_none().text_xs().text_color(theme.muted_foreground).child(tag))
+                            .when_some(account_tag, |d, (tag, color)| {
+                                d.child(
+                                    h_flex()
+                                        .flex_none()
+                                        .gap_1()
+                                        .items_center()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(div().size(px(6.)).rounded_full().bg(color))
+                                        .child(tag),
+                                )
                             }),
                     )
                     .child(
                         div()
                             .truncate()
                             .text_xs()
-                            .text_color(theme.muted_foreground)
+                            .text_color(muted)
                             .child(util::ellipsize(&m.body_preview.replace(['\r', '\n'], " "), 160)),
                     ),
             )
