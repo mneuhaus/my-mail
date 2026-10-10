@@ -162,7 +162,7 @@ pub struct MailApp {
 impl MailApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(tr!("Search mail", "E-Mails durchsuchen"))
+            InputState::new(window, cx).placeholder(tr!("Search", "Suchen"))
         });
         let subscriptions = vec![cx.subscribe_in(&search, window, |this, state, ev: &InputEvent, window, cx| {
             match ev {
@@ -1050,7 +1050,6 @@ impl Render for MailApp {
         h_flex()
             .id("just-mail")
             .size_full()
-            .bg(theme.background)
             .text_color(theme.foreground)
             .on_action(cx.listener(|this, _: &NewMessage, w, cx| this.new_message(w, cx)))
             .on_action(cx.listener(|this, _: &actions::Reply, w, cx| this.answer(false, false, w, cx)))
@@ -1074,6 +1073,6 @@ impl Render for MailApp {
             .on_action(cx.listener(|this, _: &SelectPrev, w, cx| this.select_offset(-1, w, cx)))
             .child(sidebar)
             .child(list)
-            .child(v_flex().flex_1().min_w_0().h_full().child(pane))
+            .child(v_flex().flex_1().min_w_0().h_full().bg(theme.background).child(pane))
     }
 }

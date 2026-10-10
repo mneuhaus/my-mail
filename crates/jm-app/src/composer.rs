@@ -20,7 +20,7 @@ use jm_core::{Attachment, DraftInput, Mailbox, Message, NewAttachment, Recipient
 use crate::actions::{self, SaveDraft, SendDraft};
 use crate::sidebar::TOP_H;
 use crate::signature::Preview;
-use crate::{tr, util};
+use crate::{theme, tr, util};
 
 const AUTOSAVE: Duration = Duration::from_secs(2);
 
@@ -505,8 +505,13 @@ fn field_row(label: &'static str, input: impl IntoElement, cx: &App) -> impl Int
         .items_center()
         .border_b_1()
         .border_color(theme.border.opacity(0.6))
-        .child(div().w(px(64.)).flex_none().text_sm().text_color(theme.muted_foreground).child(label))
+        .child(div().w(px(64.)).flex_none().text_size(theme::TEXT).text_color(theme.muted_foreground).child(label))
         .child(div().flex_1().min_w_0().child(input))
+}
+
+/// A header field without a frame, its text in line with the From address above it.
+fn field(state: &Entity<InputState>) -> Input {
+    Input::new(state).appearance(false).px_0().text_size(theme::TEXT)
 }
 
 impl Render for Composer {
@@ -553,7 +558,7 @@ impl Render for Composer {
                         cx.notify();
                     })),
             )
-            .child(div().flex_1().text_xs().text_color(theme.muted_foreground).child(self.status()))
+            .child(div().flex_1().text_size(theme::TEXT_SMALL).text_color(theme.muted_foreground).child(self.status()))
             .child(
                 Button::new("save")
                     .ghost()
@@ -626,22 +631,13 @@ impl Render for Composer {
                     "Dieser Entwurf stammt nicht aus Just Mail: Änderungen am Text speichern ihn als einfachen Text."
                 )))
             })
-            .child(
-                h_flex()
-                    .px_5()
-                    .py_2()
-                    .gap_3()
-                    .border_b_1()
-                    .border_color(theme.border.opacity(0.6))
-                    .child(div().w(px(64.)).flex_none().text_sm().text_color(theme.muted_foreground).child(tr!("From", "Von")))
-                    .child(div().text_sm().child(account)),
-            )
-            .child(field_row(tr!("To", "An"), Input::new(&self.to).appearance(false), cx))
+            .child(field_row(tr!("From", "Von"), h_flex().h_8().text_size(theme::TEXT).child(account), cx))
+            .child(field_row(tr!("To", "An"), field(&self.to), cx))
             .when(self.show_cc, |d| {
-                d.child(field_row("Cc", Input::new(&self.cc).appearance(false), cx))
-                    .child(field_row("Bcc", Input::new(&self.bcc).appearance(false), cx))
+                d.child(field_row("Cc", field(&self.cc), cx))
+                    .child(field_row("Bcc", field(&self.bcc), cx))
             })
-            .child(field_row(tr!("Subject", "Betreff"), Input::new(&self.subject).appearance(false), cx))
+            .child(field_row(tr!("Subject", "Betreff"), field(&self.subject), cx))
             .when(!self.attachments.is_empty(), |d| d.child(attachments))
             .child(
                 // the mail as it goes out: your text, the signature, then a reply's quote

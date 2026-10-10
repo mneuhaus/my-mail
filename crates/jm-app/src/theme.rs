@@ -6,6 +6,10 @@ use std::rc::Rc;
 use gpui_kit::component::{ActiveTheme, Theme, ThemeConfig};
 use gpui_kit::*;
 
+/// Text sizes of macOS: 13 for the interface, 11 for secondary text (gpui's text_sm/xs are 14/12).
+pub const TEXT: Pixels = px(13.);
+pub const TEXT_SMALL: Pixels = px(11.);
+
 /// (field, light, dark)
 const COLORS: &[(&str, &str, &str)] = &[
     ("background", "#ffffff", "#1c1c1e"),
@@ -14,10 +18,11 @@ const COLORS: &[(&str, &str, &str)] = &[
     ("input", "#d1d1d6", "#3a3b40"),
     ("muted", "#f2f2f7", "#2a2b2f"),
     ("muted_foreground", "#6e6e73", "#9a9ca3"),
-    ("sidebar", "#f0f0f3", "#252528"),
-    ("sidebar_border", "#e0e0e5", "#2f3034"),
+    // translucent: the window blurs the desktop behind it, like the sidebar material of macOS
+    ("sidebar", "#ececf0d0", "#262629c4"),
+    ("sidebar_border", "#00000017", "#00000099"),
     ("sidebar_foreground", "#1d1d1f", "#e4e4e7"),
-    ("sidebar_accent", "#dcdce4", "#38393e"),
+    ("sidebar_accent", "#00000014", "#ffffff17"),
     ("sidebar_accent_foreground", "#1d1d1f", "#ffffff"),
     ("list", "#f8f8fa", "#212124"),
     ("list_hover", "#eeeef3", "#2a2b30"),

@@ -14,7 +14,7 @@ use jm_core::Config;
 
 use crate::signature::Preview;
 use crate::sidebar::TOP_H;
-use crate::{i18n, tr};
+use crate::{i18n, theme, tr};
 
 pub enum SetupEvent {
     AccountsChanged,
@@ -292,7 +292,7 @@ impl Render for Setup {
         let theme = cx.theme().clone();
         let has_accounts = !self.config.accounts.is_empty();
         let section = |title: &'static str| {
-            div().mt_6().mb_2().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(title)
+            div().mt_6().mb_2().text_size(theme::TEXT_SMALL).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(title)
         };
 
         let mut accounts = v_flex().gap_4();
@@ -459,7 +459,7 @@ impl Render for Setup {
                     .border_b_1()
                     .border_color(theme.border)
                     .window_control_area(WindowControlArea::Drag)
-                    .child(div().flex_1().text_base().font_weight(FontWeight::SEMIBOLD).child(tr!(
+                    .child(div().flex_1().text_size(theme::TEXT).font_weight(FontWeight::SEMIBOLD).child(tr!(
                         "Accounts & signatures",
                         "Konten & Signaturen"
                     )))

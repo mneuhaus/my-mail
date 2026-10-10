@@ -12,7 +12,7 @@ use jm_core::Recipient;
 
 use crate::app::{MailApp, Pane, ThreadMessage};
 use crate::sidebar::TOP_H;
-use crate::{tr, util};
+use crate::{theme, tr, util};
 
 fn people(list: &[Recipient]) -> String {
     list.iter().map(Recipient::full).collect::<Vec<_>>().join(", ")
@@ -71,7 +71,7 @@ impl MailApp {
             .child(div().w(px(1.)).h(px(18.)).mx_2().bg(theme.border))
             .child(
                 Button::new("flag")
-                    .icon(Icon::new(IconName::Pin).when(flagged, |i| i.text_color(crate::theme::extra(cx).flagged)))
+                    .icon(Icon::new(IconName::Pin).when(flagged, |i| i.text_color(theme::extra(cx).flagged)))
                     .ghost()
                     .small()
                     .disabled(read_only)
@@ -98,7 +98,7 @@ impl MailApp {
                 d.child(
                     h_flex()
                         .gap_1()
-                        .text_xs()
+                        .text_size(theme::TEXT_SMALL)
                         .text_color(theme.muted_foreground)
                         .child(Icon::new(IconName::Lock).xsmall())
                         .child(tr!("read-only", "nur lesen")),
@@ -106,13 +106,10 @@ impl MailApp {
             })
             .child(
                 Button::new("copy-id")
-                    .label(format!("jm {short}"))
+                    .icon(IconName::Copy)
                     .ghost()
-                    .xsmall()
-                    .tooltip(tr!(
-                        "Copy the id for the jm CLI (Y)",
-                        "ID für die jm-CLI kopieren (Y)"
-                    ))
+                    .small()
+                    .tooltip(format!("{} · jm {short}", tr!("Copy the id for the jm CLI (Y)", "ID für die jm-CLI kopieren (Y)")))
                     .on_click(cx.listener(|this, _, w, cx| this.copy_id(w, cx))),
             );
 
@@ -132,7 +129,7 @@ impl MailApp {
                 h_flex()
                     .gap_3()
                     .items_baseline()
-                    .child(div().flex_1().min_w_0().text_sm().font_weight(FontWeight::MEDIUM).child(from))
+                    .child(div().flex_1().min_w_0().text_size(theme::TEXT).font_weight(FontWeight::MEDIUM).child(from))
                     .child(div().flex_none().text_xs().text_color(theme.muted_foreground).child(util::long_date(m.date()))),
             )
             .child(div().text_xs().text_color(theme.muted_foreground).child(recipients));
@@ -224,7 +221,7 @@ impl MailApp {
 /// The rounded box a mail body sits in.
 fn card(cx: &App) -> Div {
     let theme = cx.theme();
-    div().rounded(px(10.)).border_1().border_color(theme.border).bg(crate::theme::extra(cx).card).text_sm()
+    div().rounded(px(10.)).border_1().border_color(theme.border).bg(theme::extra(cx).card).text_sm()
 }
 
 /// A later message of the conversation (an answer, maybe our own or a draft): who, when, and only

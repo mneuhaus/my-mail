@@ -103,8 +103,15 @@ fn main() {
                 titlebar: Some(TitlebarOptions {
                     title: Some("Just Mail".into()),
                     appears_transparent: cfg!(target_os = "macos"),
-                    traffic_light_position: Some(point(px(16.), px(16.))),
+                    // centred in the top strip of the columns (sidebar::TOP_H), as in Mail and Finder
+                    traffic_light_position: Some(point(px(20.), px(19.))),
                 }),
+                // the desktop shows blurred through the sidebar (its theme color is translucent)
+                window_background: if cfg!(target_os = "macos") {
+                    WindowBackgroundAppearance::Blurred
+                } else {
+                    WindowBackgroundAppearance::Opaque
+                },
                 window_min_size: Some(size(px(980.), px(600.))),
                 ..Default::default()
             },
@@ -120,9 +127,20 @@ fn main() {
                 view
             },
         );
-        if let Err(e) = opened {
-            eprintln!("could not open the window: {e:#}");
-            cx.quit();
+        match opened {
+            // The window root paints the theme background under everything. The columns paint their
+            // own, so the root stays clear and the blur shows through the sidebar.
+            Ok((handle, _)) => {
+                let _ = handle.update(cx, |_, window, cx| {
+                    gpui_kit::base::Root::update(window, cx, |root, _, _| {
+                        root.style().background = Some(transparent_black().into());
+                    })
+                });
+            }
+            Err(e) => {
+                eprintln!("could not open the window: {e:#}");
+                cx.quit();
+            }
         }
         cx.activate(true);
     });

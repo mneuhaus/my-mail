@@ -13,7 +13,7 @@ use crate::tr;
 
 pub const SIDEBAR_W: f32 = 232.;
 /// Height of the top strip of every column (room for the traffic lights, window drag area).
-pub const TOP_H: f32 = 48.;
+pub const TOP_H: f32 = 52.;
 
 fn folder_icon(f: &Folder, x: &Extra) -> (IconName, Hsla) {
     match f.well_known.as_deref() {
@@ -93,7 +93,7 @@ impl MailApp {
                     .px_2()
                     .gap_2()
                     .items_center()
-                    .text_xs()
+                    .text_size(theme::TEXT_SMALL)
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.muted_foreground)
                     .child(div().size(px(8.)).flex_none().rounded_full().bg(theme::account_color(ix)))
@@ -178,7 +178,7 @@ impl MailApp {
                         .pl(px(8.))
                         .py_1()
                         .gap_2()
-                        .text_xs()
+                        .text_size(theme::TEXT_SMALL)
                         .text_color(theme.muted_foreground)
                         .cursor_pointer()
                         .hover(|s| s.text_color(theme.foreground))
@@ -209,7 +209,7 @@ impl MailApp {
             .child(h_flex().h(px(TOP_H)).flex_none().w_full().window_control_area(WindowControlArea::Drag))
             .child(div().id("sidebar-scroll").flex_1().min_h_0().overflow_y_scroll().child(list))
             .child(
-                h_flex().flex_none().px_2().py_2().border_t_1().border_color(theme.sidebar_border).child(item(
+                h_flex().flex_none().px_2().py_2().child(item(
                     Item {
                         id: "settings".into(),
                         icon: IconName::Settings,
@@ -232,24 +232,22 @@ fn item<F: Fn(&ClickEvent, &mut Window, &mut App) + 'static>(it: Item, cx: &Cont
     h_flex()
         .id(it.id)
         .w_full()
-        .h(px(30.))
+        .h(px(28.))
         .pl(px(8. + it.depth as f32 * 12.))
         .pr_2()
         .gap_2p5()
         .items_center()
         .rounded(px(7.))
-        .text_sm()
+        .text_size(theme::TEXT)
         .cursor_pointer()
-        .when(it.active, |d| {
-            d.bg(theme.sidebar_accent).text_color(theme.sidebar_accent_foreground).font_weight(FontWeight::MEDIUM)
-        })
+        .when(it.active, |d| d.bg(theme.sidebar_accent).text_color(theme.sidebar_accent_foreground))
         .when(!it.active, |d| d.hover(|s| s.bg(theme.sidebar_accent.opacity(0.5))))
         .child(Icon::new(it.icon).small().text_color(it.color))
         .child(div().flex_1().min_w_0().truncate().child(it.label))
         .when_some(it.count, |d, n| {
             d.child(
                 div()
-                    .text_xs()
+                    .text_size(theme::TEXT_SMALL)
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(if it.strong_count { theme.primary } else { theme.muted_foreground })
                     .child(n.to_string()),

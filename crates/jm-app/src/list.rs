@@ -1,9 +1,10 @@
-//! Middle column: search field and the message list.
+//! Middle column: title, search and compose on top, the message list below.
 
 use std::ops::Range;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme, Icon, Sizable};
@@ -56,45 +57,48 @@ impl MailApp {
         let theme = cx.theme().clone();
         let count = self.rows.len();
         let empty = count == 0 && !self.loading;
+        // one toolbar line with the reader next door, like a unified macOS toolbar: title, search, compose
         let header = h_flex()
             .h(px(TOP_H))
             .flex_none()
-            .px_4()
+            .pl_4()
+            .pr_3()
             .gap_2()
             .items_center()
+            .border_b_1()
+            .border_color(theme.border)
             .window_control_area(WindowControlArea::Drag)
             .child(
-                // one line, centred on the traffic lights and the toolbar next door
-                h_flex()
+                v_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap_2()
-                    .items_baseline()
-                    .child(div().flex_none().text_base().font_weight(FontWeight::SEMIBOLD).child(self.view_title()))
+                    .child(div().truncate().text_size(theme::TEXT).font_weight(FontWeight::SEMIBOLD).child(self.view_title()))
                     .when_some(self.view_subtitle(), |d, s| {
-                        d.child(div().flex_1().min_w_0().text_xs().text_color(theme.muted_foreground).truncate().child(s))
+                        d.child(div().truncate().text_size(theme::TEXT_SMALL).text_color(theme.muted_foreground).child(s))
                     }),
             )
             .when(self.loading, |d| {
                 d.child(Icon::new(IconName::LoaderCircle).small().text_color(theme.muted_foreground))
             })
             .child(
-                // the one round blue button: write a mail
-                div()
-                    .id("compose")
-                    .size(px(30.))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(theme.primary)
-                    .hover(|s| s.bg(theme.primary_hover))
-                    .cursor_pointer()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(Icon::new(IconName::Pencil).small().text_color(theme.primary_foreground))
-                    .tooltip(|w, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(tr!("New message (⌘N)", "Neue E-Mail (⌘N)")).build(w, cx)
-                    })
+                // a filled field without a frame, as in the toolbars of macOS; the ring shows on focus
+                div().w(px(156.)).flex_none().child(
+                    Input::new(&self.search)
+                        .small()
+                        .cleanable(true)
+                        .prefix(Icon::new(IconName::Search).xsmall().text_color(theme.muted_foreground))
+                        .text_size(theme::TEXT)
+                        .rounded(px(7.))
+                        .bg(theme.foreground.opacity(0.06))
+                        .border_color(transparent_black()),
+                ),
+            )
+            .child(
+                Button::new("compose")
+                    .icon(IconName::SquarePen)
+                    .ghost()
+                    .small()
+                    .tooltip(tr!("New message (⌘N)", "Neue E-Mail (⌘N)"))
                     .on_click(cx.listener(|this, _, w, cx| this.new_message(w, cx))),
             );
 
@@ -122,18 +126,14 @@ impl MailApp {
             .key_context(actions::LIST)
             .track_focus(&self.list_focus)
             .child(header)
-            .child(div().px_3().pb_2().flex_none().child(Input::new(&self.search).small().cleanable(true).prefix(
-                Icon::new(IconName::Search).small().text_color(theme.muted_foreground),
-            )))
-            .child(div().h(px(1.)).flex_none().bg(theme.border))
             .when_some(self.list_error.clone().filter(|_| count == 0), |d, e| {
-                d.child(div().p_4().text_sm().text_color(theme.danger).child(e))
+                d.child(div().p_4().text_size(theme::TEXT).text_color(theme.danger).child(e))
             })
             .when(empty && self.list_error.is_none(), |d| {
                 d.child(
                     div()
                         .p_6()
-                        .text_sm()
+                        .text_size(theme::TEXT)
                         .text_color(theme.muted_foreground)
                         .child(tr!("Nothing here.", "Hier ist nichts.")),
                 )
@@ -182,7 +182,7 @@ impl MailApp {
                 div()
                     .absolute()
                     .left(px((ROW_PAD - 7.) / 2.))
-                    .top(px(ROW_PAD - 5. + 7.5))
+                    .top(px(ROW_PAD - 5. + 7.))
                     .size(px(7.))
                     .rounded_full()
                     .when(unread, |d| d.bg(if selected { fg } else { theme.primary })),
@@ -197,7 +197,7 @@ impl MailApp {
                             .gap_2()
                             .items_center()
                             .when(m.is_draft, |d| {
-                                d.child(div().flex_none().text_sm().text_color(if selected { fg } else { x.drafts }).child(
+                                d.child(div().flex_none().text_size(theme::TEXT).text_color(if selected { fg } else { x.drafts }).child(
                                     tr!("Draft", "Entwurf"),
                                 ))
                             })
@@ -206,7 +206,7 @@ impl MailApp {
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
-                                    .text_sm()
+                                    .text_size(theme::TEXT)
                                     .when(unread, |d| d.font_weight(FontWeight::BOLD))
                                     .when(!unread, |d| d.font_weight(FontWeight::MEDIUM))
                                     .child(who),
@@ -228,7 +228,7 @@ impl MailApp {
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
-                                    .text_sm()
+                                    .text_size(theme::TEXT)
                                     .when(unread, |d| d.font_weight(FontWeight::MEDIUM))
                                     .child(m.subject().to_string()),
                             )
