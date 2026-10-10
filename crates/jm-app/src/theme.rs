@@ -18,8 +18,8 @@ const COLORS: &[(&str, &str, &str)] = &[
     ("input", "#d1d1d6", "#3a3b40"),
     ("muted", "#f2f2f7", "#2a2b2f"),
     ("muted_foreground", "#6e6e73", "#9a9ca3"),
-    // translucent: the window blurs the desktop behind it, like the sidebar material of macOS
-    ("sidebar", "#ececf0d0", "#262629c4"),
+    // slightly translucent: the window blurs the desktop behind it, like the sidebar material of macOS
+    ("sidebar", "#ececf0ee", "#262629ec"),
     ("sidebar_border", "#00000017", "#00000099"),
     ("sidebar_foreground", "#1d1d1f", "#e4e4e7"),
     ("sidebar_accent", "#00000014", "#ffffff17"),
