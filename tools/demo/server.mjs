@@ -47,15 +47,36 @@ const message = (folderId, minutes, from, subject, html, extra = {}) => ({
 });
 // Tom's Outlook signature: a logo embedded as an inline attachment (cid:) and a label/value table
 const logo = readFileSync(new URL("./becker-logo.png", import.meta.url));
-const beckerSignature = `<table><tr><td><p><img width="200" height="40" src="cid:image001.png@becker" alt="Becker &amp; Sons"></p></td></tr>
-<tr><td><p><b>Tom Becker</b><br>Project lead</p></td></tr>
-<tr><td><table><tr><td><p><b>Phone</b></p></td><td><p>+1 555 0100</p></td></tr>
-<tr><td><p><b>Web</b></p></td><td><p><a href="https://beckerandsons.example">beckerandsons.example</a></p></td></tr></table></td></tr></table>`;
+const beckerSignature = `<table><tr><td><p style="margin:0"><img width="200" height="40" src="cid:image001.png@becker" alt="Becker &amp; Sons"></p></td></tr>
+<tr><td><p style="margin:0"><b>Tom Becker</b><br>Project lead</p></td></tr>
+<tr><td><table><tr><td><p style="margin:0"><b>Phone</b></p></td><td><p style="margin:0">+1 555 0100</p></td></tr>
+<tr><td><p style="margin:0"><b>Web</b></p></td><td><p style="margin:0"><a href="https://beckerandsons.example">beckerandsons.example</a></p></td></tr></table></td></tr></table>`;
 const pdf = (name, size) => ({
   "@odata.type": "#microsoft.graph.fileAttachment", id: `att-${name}`, name, contentType: "application/pdf", size, isInline: false,
 });
 
 const lines = (...l) => l.map((x) => `<div>${x || "<br>"}</div>`).join("");
+
+// a designed newsletter: preview text hidden for the inbox list, its own colors, two columns
+const pick = (title, text) => `<td width="50%" valign="top" style="padding:0 12px 20px 12px">
+  <div style="font:600 16px/22px Georgia,serif;color:#1f2a44">${title}</div>
+  <div style="font:14px/21px Helvetica,Arial,sans-serif;color:#5a6172;margin-top:6px">${text}</div></td>`;
+const designWeekly = `<div style="display:none;max-height:0;overflow:hidden">This week: five apps that get out of your way.</div>
+<div style="background-color:#f1efe9;padding:24px 0">
+<table align="center" width="600" cellpadding="0" cellspacing="0" role="presentation" style="background:#ffffff;border-radius:8px">
+<tr><td style="background:#1f2a44;color:#ffffff;padding:28px 36px;border-radius:8px 8px 0 0">
+  <div style="font:12px/16px Helvetica,Arial,sans-serif;letter-spacing:2px;color:#e9b44c">DESIGN WEEKLY · ISSUE 112</div>
+  <div style="font:600 28px/34px Georgia,serif;margin-top:8px">Five calm interfaces</div></td></tr>
+<tr><td style="padding:28px 36px 8px;font:15px/24px Helvetica,Arial,sans-serif;color:#2b2f38">
+  Less chrome reads faster. This week we looked at apps that get out of your way, and what they leave out.</td></tr>
+<tr><td style="padding:12px 24px 0"><table width="100%" cellpadding="0" cellspacing="0" role="presentation">
+<tr>${pick("Quiet Notes", "One column, no toolbar until you select text.")}${pick("Tidewater", "A weather app that shows one number and a sentence.")}</tr>
+<tr>${pick("Ledgerly", "Bookkeeping where every screen answers one question.")}${pick("Sparrow Mail", "Bundles instead of folders, and nothing blinking.")}</tr>
+</table></td></tr>
+<tr><td style="padding:8px 36px 32px"><a href="https://designweekly.example/112" style="display:inline-block;background:#e9b44c;color:#1f2a44;font:600 14px/20px Helvetica,Arial,sans-serif;text-decoration:none;padding:10px 18px;border-radius:6px">Read the issue</a></td></tr>
+<tr><td style="background:#f7f6f2;padding:16px 36px;font:12px/18px Helvetica,Arial,sans-serif;color:#8a8f99;border-radius:0 0 8px 8px">
+  Design Weekly, 12 Harbor Street · <a href="https://designweekly.example/unsubscribe" style="color:#8a8f99">Unsubscribe</a></td></tr>
+</table></div>`;
 
 const alex = {
   folders: [
@@ -104,8 +125,7 @@ const alex = {
       lines("Planned maintenance on Sunday, 02:00 to 04:00 UTC. No action needed.")),
     message("f-inbox", 60 * 200, person("Peter Schulz", "peter@schulz-law.example"), "Re: Contract draft",
       lines("Dear Alex,", "", "I went through the draft and marked two clauses. Happy to discuss on a call.", "", "Peter Schulz")),
-    message("f-inbox", 60 * 260, person("Design Weekly", "hello@designweekly.example"), "Five calm interfaces",
-      lines("This week: five apps that get out of your way, and why less chrome reads faster.")),
+    message("f-inbox", 60 * 260, person("Design Weekly", "hello@designweekly.example"), "Five calm interfaces", designWeekly),
     message("f-drafts", 12, me, "Re: Lunch on Thursday?",
       `<div id="jm-body">Sounds great, Thursday at 12:30 works for me.<br><br>See you there!</div>`,
       { isDraft: true, from: null, toRecipients: [person("Maria Lopez", "maria@lopez.example")] }),

@@ -293,20 +293,96 @@ fn push_collapsed(out: &mut String, text: &str) {
     }
 }
 
-/// Readable plain text of a whole mail, links as footnotes (for the CLI and MCP).
+/// Readable plain text of a whole mail, links as footnotes (for the CLI and MCP). What the mail's
+/// CSS hides (a newsletter's preview text) stays out.
 pub fn to_readable_text(html: &str, width: usize) -> String {
-    html2text::from_read(html.as_bytes(), width).unwrap_or_else(|_| html_to_text(html))
+    html2text::config::plain().use_doc_css().string_from_read(html.as_bytes(), width).unwrap_or_else(|_| html_to_text(html))
 }
 
-/// Clean mail HTML for display: no scripts, styles or event handlers, no remote images unless
-/// asked for (they are mostly tracking pixels), layout tables flattened.
+/// Clean mail HTML for display: no scripts, styles or event handlers, nothing the mail hides,
+/// no remote images unless asked for (they are mostly tracking pixels), layout tables flattened.
 pub fn sanitize_for_display(html: &str, remote_images: bool) -> String {
+    // a first pass keeps `style` and normalizes the markup, so hidden elements can be cut out
+    let mut styled = ammonia::Builder::default();
+    styled.add_generic_attributes(["style"]);
+    let html = drop_hidden(&styled.clean(html).to_string());
     let mut builder = ammonia::Builder::default();
     builder.link_rel(Some("noopener noreferrer"));
     if !remote_images {
         builder.rm_tags(["img"]);
     }
-    flatten_layout_tables(&join_short_rows(&builder.clean(html).to_string()))
+    flatten_layout_tables(&join_short_rows(&builder.clean(&html).to_string()))
+}
+
+/// The HTML without the elements its inline CSS hides, with all they contain: the preview text
+/// a newsletter puts first for the inbox list (`display: none`) mostly. Expects normalized HTML
+/// (ammonia output with `style` kept).
+fn drop_hidden(html: &str) -> String {
+    const VOID: [&str; 6] = ["br", "hr", "img", "input", "meta", "wbr"];
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(lt) = rest.find('<') {
+        let tail = &rest[lt + 1..];
+        let name: String = tail.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        let hidden = tail.find('>').filter(|_| !name.is_empty()).filter(|&gt| {
+            let lower = tail[..gt].to_ascii_lowercase();
+            attr_value(&lower, 0, gt, "style").is_some_and(|(s, e)| hides(&lower[s..e]))
+        });
+        let Some(gt) = hidden else {
+            out.push_str(&rest[..lt + 1]);
+            rest = tail;
+            continue;
+        };
+        out.push_str(&rest[..lt]);
+        rest = &tail[gt + 1..];
+        if !VOID.contains(&name.as_str()) {
+            // an end tag that never comes keeps the content: better shown than lost
+            rest = skip_element(rest, &name).unwrap_or(rest);
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// What follows the end tag of the `name` element whose content starts `html`.
+fn skip_element<'a>(html: &'a str, name: &str) -> Option<&'a str> {
+    let (open, close) = (format!("<{name}"), format!("</{name}>"));
+    let mut depth = 1;
+    let mut pos = 0;
+    while depth > 0 {
+        let next_close = pos + html[pos..].find(&close)?;
+        // `<b` must not count a `<br>`
+        let next_open = html[pos..next_close]
+            .match_indices(&open)
+            .map(|(i, _)| pos + i)
+            .find(|&i| matches!(html.as_bytes().get(i + open.len()), Some(b'>' | b' ' | b'/')));
+        match next_open {
+            Some(o) => {
+                depth += 1;
+                pos = o + open.len();
+            }
+            None => {
+                depth -= 1;
+                pos = next_close + close.len();
+            }
+        }
+    }
+    Some(&html[pos..])
+}
+
+/// Whether inline CSS hides its element: `display: none`, `visibility: hidden`, or no height
+/// with the overflow cut off.
+fn hides(style: &str) -> bool {
+    let decls: Vec<(&str, &str)> = style
+        .split(';')
+        .filter_map(|d| d.split_once(':'))
+        .map(|(k, v)| (k.trim(), v.trim().trim_end_matches("!important").trim()))
+        .collect();
+    let has = |key: &str, value: &dyn Fn(&str) -> bool| decls.iter().any(|(k, v)| *k == key && value(v));
+    let zero = |v: &str| v.trim_end_matches(|c: char| c.is_ascii_alphabetic()).parse::<f32>().is_ok_and(|n| n == 0.);
+    has("display", &|v| v == "none")
+        || has("visibility", &|v| v == "hidden")
+        || (has("max-height", &zero) && has("overflow", &|v| v == "hidden"))
 }
 
 /// Mail HTML as Markdown for display: cleaned like [`sanitize_for_display`], then converted, so
@@ -348,6 +424,74 @@ pub fn to_display_markdown(html: &str, remote_images: bool, images: &[InlineImag
         out = out.replace(&format!("{PICTURE}{n}Z"), picture);
     }
     out
+}
+
+/// Mail HTML as a page of its own for the app's web view, which shows it as designed: embedded
+/// pictures (`cid:` in `images`) become `data:` URLs, and what could run, navigate or load on its
+/// own goes (scripts, frames, plugins, a refresh, a base URL). The web view adds the rest: a
+/// sandbox without scripts and a content policy that keeps remote content out unless allowed.
+pub fn to_web_document(html: &str, images: &[InlineImage]) -> String {
+    use base64::Engine as _;
+    let html = strip_active(html);
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len());
+    let mut copied = 0;
+    for (start, end) in img_tags(&lower) {
+        let Some((s, e)) = attr_value(&lower, start, end, "src") else { continue };
+        let Some(id) = lower[s..e].trim().strip_prefix("cid:").map(|_| content_id(&html[s..e].trim()[4..])) else { continue };
+        let Some(image) = images.iter().find(|i| i.content_id.eq_ignore_ascii_case(&id)) else { continue };
+        let mime = image_type(&image.bytes).unwrap_or(image.content_type.as_str());
+        out.push_str(&html[copied..s]);
+        out.push_str(&format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&image.bytes)));
+        copied = e;
+    }
+    out.push_str(&html[copied..]);
+    out
+}
+
+/// The HTML without scripts, frames, plugins, refreshes and base URLs. Works on raw mail HTML.
+fn strip_active(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len());
+    let (mut copied, mut pos) = (0, 0);
+    while let Some(lt) = lower[pos..].find('<').map(|i| pos + i) {
+        let name: String = lower[lt + 1..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        let Some(gt) = lower[lt..].find('>').map(|i| lt + i) else { break };
+        let end = match name.as_str() {
+            // their content is raw text up to the first end tag
+            "script" | "iframe" | "noembed" | "noframes" => {
+                let close = format!("</{name}");
+                lower[gt..].find(&close).and_then(|i| lower[gt + i..].find('>').map(|j| gt + i + j + 1)).unwrap_or(lower.len())
+            }
+            "object" | "embed" | "applet" | "frame" | "frameset" | "base" => gt + 1,
+            "meta" if lower[lt..gt].contains("refresh") => gt + 1,
+            _ => {
+                pos = gt + 1;
+                continue;
+            }
+        };
+        out.push_str(&html[copied..lt]);
+        (copied, pos) = (end, end);
+    }
+    out.push_str(&html[copied..]);
+    out
+}
+
+/// Whether the mail brings its own background colors (a newsletter, a designed signature). Such
+/// mail is shown as designed on light even in dark mode; plain mail takes the app's colors.
+pub fn has_own_colors(html: &str) -> bool {
+    let lower = html.to_ascii_lowercase();
+    let set = |value: &str| {
+        let value = value.trim_start_matches(|c: char| c == '=' || c == ':' || c == '"' || c == '\'' || c.is_whitespace());
+        let value = value.split([';', '"', '\'', '}', '>']).next().unwrap_or("").trim();
+        !matches!(value, "" | "none" | "transparent" | "inherit" | "initial" | "unset")
+    };
+    lower.match_indices("bgcolor").any(|(i, _)| set(&lower[i + 7..]))
+        || lower.match_indices("background").any(|(i, _)| {
+            let rest = &lower[i + 10..];
+            let rest = rest.strip_prefix("-color").or_else(|| rest.strip_prefix("-image")).unwrap_or(rest);
+            rest.trim_start().starts_with([':', '=']) && set(rest)
+        })
 }
 
 /// Pictures wider than this many pixels are shown scaled down.
@@ -705,6 +849,51 @@ mod tests {
         let clean = sanitize_for_display(html, false);
         assert!(!clean.contains("<img") && !clean.contains("script"));
         assert!(sanitize_for_display(html, true).contains("<img"));
+    }
+
+    #[test]
+    fn hidden_preview_text_stays_out() {
+        let html = "<body><div style=\"display:none; font-size:1px; max-height:0px; overflow:hidden\">Vorschau \
+                    <div>verschachtelt</div><b>fett</b><br></div>\
+                    <span style=\"max-height: 0; overflow: hidden\">auch weg</span>\
+                    <p style=\"Display: None !important\">weg</p>\
+                    <div style=\"font-size:0px\"><div style=\"font-size:16px\"><p>Hallo Anna,<br>sichtbar</p></div></div>\
+                    <span style=\"max-height:0px\">bleibt</span><b style=\"display:none\">x</b><br>Ende</body>";
+        let md = to_display_markdown(html, false, &[]);
+        assert_eq!(md, "Hallo Anna,\\\nsichtbar\n\nbleibt\\\nEnde");
+        let text = to_readable_text(html, 80);
+        assert!(text.contains("Hallo Anna") && !text.contains("Vorschau") && !text.contains("weg"), "{text}");
+    }
+
+    #[test]
+    fn web_document_inlines_pictures_and_drops_what_runs() {
+        let logo = InlineImage {
+            content_id: "logo@example".into(),
+            name: "logo.png".into(),
+            content_type: "application/octet-stream".into(),
+            bytes: png(20, 10),
+        };
+        let html = "<html><head><META http-equiv=\"refresh\" content=\"0;url=https://x.example\"><base href=\"https://x.example/\">\
+                    <SCRIPT>alert('<b>')</SCRIPT></head><body style=\"background:#f4f4f4\">\
+                    <img src=\"cid:logo%40example\" width=\"20\"><img src=\"cid:missing\">\
+                    <iframe src=\"https://x.example\">inner</iframe><object data=\"x.swf\">fallback</object>\
+                    <p onclick=\"x()\">Text</p></body></html>";
+        let doc = to_web_document(html, &[logo]);
+        assert!(doc.contains("<img src=\"data:image/png;base64,iVBORw0KGgo"), "{doc}");
+        assert!(doc.contains("<img src=\"cid:missing\">"));
+        for gone in ["refresh", "<base", "alert", "SCRIPT", "iframe", "inner", "<object"] {
+            assert!(!doc.contains(gone), "{gone} in {doc}");
+        }
+        assert!(doc.contains("fallback") && doc.contains("<p onclick=\"x()\">Text</p>"));
+    }
+
+    #[test]
+    fn tells_designed_mail_from_plain() {
+        assert!(has_own_colors("<body style=\"word-spacing:normal; background-color:#F4F4F4\">"));
+        assert!(has_own_colors("<td bgcolor=\"#ffffff\">"));
+        assert!(has_own_colors("<style>.x { background: url(x.png) }</style>"));
+        assert!(!has_own_colors("<p style=\"color:#1F497D; background: transparent\">Gruß</p>"));
+        assert!(!has_own_colors("<div style=\"background-repeat:no-repeat\">no background here</div>"));
     }
 
     #[test]

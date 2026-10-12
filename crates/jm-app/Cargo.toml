@@ -16,3 +16,6 @@ chrono.workspace = true
 jm-core = { workspace = true, features = ["send"] }
 gpui-kit = "0.7"
 sys-locale = "0.3"
+wry = { version = "0.57", default-features = false }
+futures = "0.3"
+html-escape = "0.2"

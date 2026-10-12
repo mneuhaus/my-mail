@@ -83,6 +83,8 @@ pub fn register(cx: &mut App) {
     let t = Theme::global_mut(cx);
     t.light_theme = apply(&t.light_theme, false);
     t.dark_theme = apply(&t.dark_theme, true);
+    // over sidebar and list: GPUI cannot draw over the web view of the mail
+    t.notification.placement = Anchor::BottomLeft;
 }
 
 fn hex(v: u32) -> Hsla {

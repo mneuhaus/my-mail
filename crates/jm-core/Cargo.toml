@@ -21,7 +21,7 @@ dirs = "6"
 base64 = "0.22"
 sha2 = "0.10"
 ammonia = "4"
-html2text = "0.14"
+html2text = { version = "0.14", features = ["css"] }
 htmd = "0.5"
 html-escape = "0.2"
 url = "2"

@@ -1,16 +1,19 @@
-//! Right column when a received mail is open: toolbar, header, attachments, body, and below it
-//! what came after it in the conversation.
+//! Right column when a received mail is open: toolbar, header, attachments, and below them in a
+//! web view the body and what came after it in the conversation.
+
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, Selectable as _, Sizable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use jm_core::Recipient;
+use jm_core::html::to_web_document;
 
-use crate::app::{MailApp, Pane, ThreadMessage};
+use crate::app::{MailApp, Opened, Pane, ThreadMessage, body_html};
+use crate::mailview::{Card, CardHead, Palette, WebMessage};
 use crate::sidebar::TOP_H;
 use crate::{theme, tr, util};
 
@@ -189,79 +192,112 @@ impl MailApp {
                 )
         });
 
-        let body_id = SharedString::from(format!("body-{}-{}-{}", m.id, opened.images_loaded, opened.pictures.len()));
-        let body = TextView::markdown(ElementId::Name(body_id), opened.html.clone()).selectable(true);
-        let later: Vec<_> = (opened.thread.iter().enumerate())
-            .map(|(i, t)| later_card(i, t, opened.account, opened.images_loaded, cx))
-            .collect();
+        let body = match &mut self.mail_view {
+            Some(view) => {
+                let mut key = DefaultHasher::new();
+                for (id, pictures) in [(&m.id, opened.pictures.len())]
+                    .into_iter()
+                    .chain(opened.thread.iter().map(|t| (&t.message.id, t.pictures.len())))
+                {
+                    (id, pictures).hash(&mut key);
+                }
+                let palette = Palette {
+                    dark: theme.mode.is_dark(),
+                    foreground: theme.foreground,
+                    muted: theme.muted_foreground,
+                    border: theme.border,
+                    card: theme::extra(cx).card,
+                    hover: theme.secondary_hover,
+                    link: theme.link,
+                    selection: theme.selection,
+                };
+                view.show(key.finish(), || cards(opened), opened.images_loaded, &palette);
+                view.element().into_any_element()
+            }
+            None => div()
+                .px_6()
+                .text_size(theme::TEXT)
+                .text_color(theme.muted_foreground)
+                .child(tr!("This mail cannot be shown (no web view).", "Diese E-Mail kann nicht angezeigt werden (keine Web-Ansicht)."))
+                .into_any_element(),
+        };
 
         v_flex()
             .size_full()
             .child(toolbar)
-            .child(
-                div().id("reader-scroll").flex_1().min_h_0().overflow_y_scroll().child(
-                    v_flex()
-                        .w_full()
-                        .child(header)
-                        .children(attachments)
-                        .children(images_banner)
-                        .child(
-                            v_flex()
-                                .mx_6()
-                                .mb_6()
-                                .gap_3()
-                                .child(card(cx).px_6().py_5().child(body))
-                                .children(later),
-                        ),
-                ),
-            )
+            .child(header)
+            .children(attachments)
+            .children(images_banner)
+            .child(div().flex_1().min_h_0().child(body))
+    }
+
+    /// What the mail's web view asks for: links, copying, keys for the app, editing a draft.
+    pub fn on_web_message(&mut self, message: WebMessage, window: &mut Window, cx: &mut Context<Self>) {
+        match message {
+            WebMessage::Open(url) => {
+                if ["https:", "http:", "mailto:", "tel:"].iter().any(|scheme| url.starts_with(scheme)) {
+                    cx.open_url(&url);
+                }
+            }
+            WebMessage::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            WebMessage::Key { key, cmd, shift } => {
+                // the list's shortcuts act on the open mail
+                self.focus_list(window, cx);
+                // after this update: the shortcut's action updates the app itself
+                if let Some(keystroke) = keystroke(&key, cmd, shift) {
+                    window.defer(cx, move |window, cx| {
+                        window.dispatch_keystroke(keystroke, cx);
+                    });
+                }
+            }
+            WebMessage::Edit(id) => {
+                if let Pane::Reader(opened) = &self.pane {
+                    let account = opened.account;
+                    self.open_draft(account, id, window, cx);
+                }
+            }
+        }
     }
 }
 
-/// The rounded box a mail body sits in.
-fn card(cx: &App) -> Div {
-    let theme = cx.theme();
-    div().rounded(px(10.)).border_1().border_color(theme.border).bg(theme::extra(cx).card).text_sm()
+/// The open mail and what followed it in the conversation (an answer, maybe our own or a draft:
+/// who, when, and only what it adds to the mail above), as cards for the web view.
+fn cards(opened: &Opened) -> Vec<Card> {
+    let mail = Card { head: None, html: to_web_document(&body_html(opened.message.body.as_ref()), &opened.pictures) };
+    let later = opened.thread.iter().map(|later| {
+        let m = &later.message;
+        let to = m.to_recipients.iter().chain(&m.cc_recipients).map(Recipient::display).collect::<Vec<_>>().join(", ");
+        Card {
+            head: Some(CardHead {
+                sender: if m.is_draft { tr!("Draft", "Entwurf").to_string() } else { m.sender() },
+                date: util::long_date(m.date()),
+                to: if to.is_empty() { to } else { format!("{} {to}", tr!("To", "An")) },
+                draft: m.is_draft.then(|| m.id.clone()),
+            }),
+            html: to_web_document(&ThreadMessage::new_part(m), &later.pictures),
+        }
+    });
+    std::iter::once(mail).chain(later).collect()
 }
 
-/// A later message of the conversation (an answer, maybe our own or a draft): who, when, and only
-/// what it adds to the mail above.
-fn later_card(i: usize, later: &ThreadMessage, account: usize, images: bool, cx: &mut Context<MailApp>) -> Div {
-    let theme = cx.theme().clone();
-    let m = &later.message;
-    let to = m.to_recipients.iter().chain(&m.cc_recipients).map(Recipient::display).collect::<Vec<_>>().join(", ");
-    let draft = m.is_draft.then(|| {
-        let id = m.id.clone();
-        Button::new(("edit-draft", i))
-            .label(tr!("Edit", "Bearbeiten"))
-            .icon(IconName::Pencil)
-            .xsmall()
-            .ghost()
-            .on_click(cx.listener(move |this, _, w, cx| this.open_draft(account, id.clone(), w, cx)))
-    });
-    let sender = if m.is_draft { tr!("Draft", "Entwurf").to_string() } else { m.sender() };
-    let body_id = SharedString::from(format!("later-{}-{images}", m.id));
-    card(cx)
-        .child(
-            v_flex()
-                .px_6()
-                .pt_4()
-                .gap_0p5()
-                .child(
-                    h_flex()
-                        .gap_3()
-                        .items_center()
-                        .child(div().flex_1().min_w_0().font_weight(FontWeight::MEDIUM).child(sender))
-                        .children(draft)
-                        .child(div().flex_none().text_xs().text_color(theme.muted_foreground).child(util::long_date(m.date()))),
-                )
-                .when(!to.is_empty(), |d| {
-                    d.child(div().text_xs().text_color(theme.muted_foreground).child(format!("{} {to}", tr!("To", "An"))))
-                }),
-        )
-        .child(
-            div().px_6().pt_3().pb_5().child(TextView::markdown(ElementId::Name(body_id), later.html.clone()).selectable(true)),
-        )
+/// A key the web view passed on as GPUI understands it (`cmd-shift-r`, `backspace`, `e`).
+fn keystroke(key: &str, cmd: bool, shift: bool) -> Option<Keystroke> {
+    let named = match key {
+        "Backspace" => Some("backspace"),
+        "Delete" => Some("delete"),
+        "Escape" => Some("escape"),
+        "Enter" => Some("enter"),
+        _ => None,
+    };
+    let key = match named {
+        Some(name) => name.to_string(),
+        None if key.chars().count() == 1 => key.to_lowercase(),
+        None => return None,
+    };
+    // shift is part of a symbol already ("?"), not of a letter or a named key
+    let shift = shift && (named.is_some() || key.chars().all(char::is_alphabetic));
+    let text = format!("{}{}{key}", if cmd { "cmd-" } else { "" }, if shift { "shift-" } else { "" });
+    Keystroke::parse(&text).ok()
 }
 
 fn tool(

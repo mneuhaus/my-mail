@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures::StreamExt as _;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
@@ -20,6 +21,7 @@ use jm_core::{AccountConfig, Attachment, Body, Config, FlagStatus, Folder, Mailb
 
 use crate::actions::{self, *};
 use crate::composer::{Composer, ComposerEvent};
+use crate::mailview::MailView;
 use crate::setup::{Setup, SetupEvent};
 use crate::{i18n, tr};
 
@@ -72,8 +74,6 @@ pub struct Opened {
     pub account: usize,
     pub message: Message,
     pub attachments: Vec<Attachment>,
-    /// The body as Markdown (see `jm_core::html::to_display_markdown`).
-    pub html: SharedString,
     /// The pictures the body embeds (logos in signatures, pasted screenshots), once fetched.
     pub pictures: Vec<InlineImage>,
     pub has_remote_images: bool,
@@ -82,16 +82,8 @@ pub struct Opened {
     pub thread: Vec<ThreadMessage>,
 }
 
-impl Opened {
-    /// Convert the body again, after its pictures arrived or remote images were allowed.
-    fn render(&mut self) {
-        let html = body_html(self.message.body.as_ref());
-        self.html = jm_core::html::to_display_markdown(&html, self.images_loaded, &self.pictures).into();
-    }
-}
-
 /// A body as HTML; plain text becomes HTML.
-fn body_html(body: Option<&Body>) -> String {
+pub(crate) fn body_html(body: Option<&Body>) -> String {
     match body {
         Some(b) if b.is_html() => b.content.clone(),
         Some(b) => jm_core::html::text_to_html(&b.content),
@@ -103,28 +95,15 @@ fn body_html(body: Option<&Body>) -> String {
 pub struct ThreadMessage {
     pub message: Message,
     pub pictures: Vec<InlineImage>,
-    /// Markdown of the part that is new in it.
-    pub html: SharedString,
 }
 
 impl ThreadMessage {
-    fn new(message: Message, pictures: Vec<InlineImage>, remote: bool) -> Self {
-        let mut later = ThreadMessage { message, pictures, html: SharedString::default() };
-        later.render(remote);
-        later
-    }
-
     /// What a message adds, as HTML: Graph's `unique_body`, else its preview.
-    fn new_part(message: &Message) -> String {
+    pub(crate) fn new_part(message: &Message) -> String {
         match message.unique_body.as_ref().filter(|b| !b.content.trim().is_empty()) {
             Some(b) => body_html(Some(b)),
             None => jm_core::html::text_to_html(&message.body_preview),
         }
-    }
-
-    fn render(&mut self, remote: bool) {
-        let html = Self::new_part(&self.message);
-        self.html = jm_core::html::to_display_markdown(&html, remote, &self.pictures).into();
     }
 }
 
@@ -155,6 +134,8 @@ pub struct MailApp {
     generation: u64,
     /// Row a context menu action applies to (instead of the selection).
     menu_target: Option<String>,
+    /// The open mail's body and conversation (WebKit); `None` if it could not be made.
+    pub mail_view: Option<MailView>,
     last_folder_refresh: Instant,
     _subscriptions: Vec<Subscription>,
 }
@@ -174,6 +155,23 @@ impl MailApp {
                 _ => {}
             }
         })];
+        let mail_view = match MailView::new(window) {
+            Ok((view, mut messages)) => {
+                cx.spawn_in(window, async move |this, cx| {
+                    while let Some(message) = messages.next().await {
+                        if this.update_in(cx, |this, window, cx| this.on_web_message(message, window, cx)).is_err() {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+                Some(view)
+            }
+            Err(e) => {
+                eprintln!("no web view for mail: {e}");
+                None
+            }
+        };
         let mut app = Self {
             config: Config::default(),
             accounts: Vec::new(),
@@ -190,6 +188,7 @@ impl MailApp {
             list_focus: cx.focus_handle(),
             generation: 0,
             menu_target: None,
+            mail_view,
             last_folder_refresh: Instant::now(),
             _subscriptions: subscriptions,
         };
@@ -683,8 +682,7 @@ impl MailApp {
                 if opened.message.id != wanted {
                     return;
                 }
-                let remote = opened.images_loaded;
-                opened.thread = later.into_iter().map(|(m, pictures)| ThreadMessage::new(m, pictures, remote)).collect();
+                opened.thread = later.into_iter().map(|(message, pictures)| ThreadMessage { message, pictures }).collect();
             },
         );
     }
@@ -707,7 +705,6 @@ impl MailApp {
                 let (Pane::Reader(opened), Ok(pictures)) = (&mut this.pane, result) else { return };
                 if opened.message.id == wanted && !pictures.is_empty() {
                     opened.pictures = pictures;
-                    opened.render();
                 }
             },
         );
@@ -990,10 +987,6 @@ impl MailApp {
     pub fn load_images(&mut self, cx: &mut Context<Self>) {
         if let Pane::Reader(opened) = &mut self.pane {
             opened.images_loaded = true;
-            opened.render();
-            for later in &mut opened.thread {
-                later.render(true);
-            }
             cx.notify();
         }
     }
@@ -1017,18 +1010,15 @@ impl MailApp {
 /// Reader state for a fetched message; its pictures and conversation follow.
 fn reader_state(account: usize, message: Message, attachments: Vec<Attachment>, remote: bool) -> Opened {
     let has_remote_images = jm_core::html::has_remote_images(&body_html(message.body.as_ref()));
-    let mut opened = Opened {
+    Opened {
         account,
-        html: SharedString::default(),
         message,
         attachments,
         pictures: Vec::new(),
         has_remote_images,
         images_loaded: remote,
         thread: Vec::new(),
-    };
-    opened.render();
-    opened
+    }
 }
 
 impl Focusable for MailApp {
@@ -1042,6 +1032,10 @@ impl Render for MailApp {
         let theme = cx.theme().clone();
         let sidebar = self.render_sidebar(window, cx);
         let list = self.render_list(window, cx);
+        // the web view lies on top of the window, so it has to go with the reader
+        if let Some(view) = self.mail_view.as_ref().filter(|_| !matches!(self.pane, Pane::Reader(_))) {
+            view.hide(cx);
+        }
         let pane: AnyElement = match &self.pane {
             Pane::Composer(c) => c.clone().into_any_element(),
             Pane::Setup(s) => s.clone().into_any_element(),

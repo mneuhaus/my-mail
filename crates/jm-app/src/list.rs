@@ -19,6 +19,8 @@ use crate::{theme, tr, util};
 pub const LIST_W: f32 = 380.;
 /// Padding around a row, the same on every side.
 const ROW_PAD: f32 = 16.;
+/// About as wide as the right-click menu of a row gets.
+const MENU_W: Pixels = px(240.);
 
 impl MailApp {
     fn view_title(&self) -> String {
@@ -270,7 +272,13 @@ impl MailApp {
         let read = row.message.is_read;
         let read_only = self.accounts.get(row.account).is_none_or(|a| a.config.read_only);
         let app = cx.entity().downgrade();
-        move |menu, _, _| {
+        move |menu, window, cx| {
+            // reaching into the reader, the menu would lie under the mail: the mail goes while it is open
+            let right = window.mouse_position().x + MENU_W;
+            let mut cover = app.upgrade().and_then(|app| app.read(cx).mail_view.as_ref()?.cover(right));
+            if cover.is_some() {
+                cx.subscribe_self(move |_, _: &DismissEvent, _| drop(cover.take())).detach();
+            }
             let item = |label: &'static str, icon: IconName, action: RowAction, enabled: bool| {
                 let (app, id) = (app.clone(), id.clone());
                 PopupMenuItem::new(label).icon(icon).disabled(!enabled).on_click(move |_, window, cx| {
