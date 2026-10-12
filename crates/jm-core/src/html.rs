@@ -16,18 +16,110 @@ const FONT: &str = "font-family: Calibri, Helvetica, Arial, sans-serif; font-siz
 const BODY_ID: &str = "jm-body";
 const SIGNATURE_ID: &str = "jm-signature";
 
+/// Pictures in the author's text are shown at most this many pixels wide.
+const TEXT_PICTURE_W: u32 = 600;
+
 /// Plain text to mail HTML: escaped, line breaks as `<br>`.
 pub fn text_to_html(text: &str) -> String {
+    text_to_html_with(text, &[])
+}
+
+/// A picture in the author's text: `[name]` in the editor, its `<img>` in the mail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextPicture {
+    pub name: String,
+    pub tag: String,
+}
+
+impl TextPicture {
+    /// The picture attached as `content_id`, `size` pixels big (shown at most 600 wide).
+    pub fn new(name: &str, content_id: &str, (width, height): (u32, u32)) -> Self {
+        let (w, h) = if width > TEXT_PICTURE_W {
+            (TEXT_PICTURE_W, (u64::from(height) * u64::from(TEXT_PICTURE_W) / u64::from(width)).max(1) as u32)
+        } else {
+            (width, height)
+        };
+        let alt = html_escape::encode_double_quoted_attribute(name);
+        let tag = format!(
+            "<img src=\"cid:{content_id}\" alt=\"{alt}\" width=\"{w}\" height=\"{h}\" style=\"max-width:100%;height:auto\">"
+        );
+        TextPicture { name: name.to_string(), tag }
+    }
+
+    /// How the editor shows it.
+    pub fn marker(&self) -> String {
+        format!("[{}]", self.name)
+    }
+
+    pub fn content_id(&self) -> Option<String> {
+        content_ids(&self.tag).into_iter().next()
+    }
+}
+
+/// [`text_to_html`] with every `[name]` of one of `pictures` as that picture.
+pub fn text_to_html_with(text: &str, pictures: &[TextPicture]) -> String {
+    let markers: Vec<(String, &str)> =
+        pictures.iter().map(|p| (html_escape::encode_text(&p.marker()).into_owned(), p.tag.as_str())).collect();
     let text = text.replace("\r\n", "\n");
     text.trim_end_matches('\n')
         .split('\n')
         .map(|line| {
             // keep indentation visible
             let indent = line.len() - line.trim_start_matches(' ').len();
-            format!("{}{}", "&nbsp;".repeat(indent), html_escape::encode_text(&line[indent..]))
+            let mut line = html_escape::encode_text(&line[indent..]).into_owned();
+            for (marker, tag) in &markers {
+                line = line.replace(marker, tag);
+            }
+            format!("{}{line}", "&nbsp;".repeat(indent))
         })
         .collect::<Vec<_>>()
         .join("<br>\n")
+}
+
+/// [`html_to_text`] with each embedded picture (`<img src="cid:…">`) as `[name]`, its `alt` text
+/// or else its content id, and those pictures.
+pub fn html_to_text_with_pictures(html: &str) -> (String, Vec<TextPicture>) {
+    let lower = html.to_ascii_lowercase();
+    let mut marked = String::with_capacity(html.len());
+    let mut pictures: Vec<TextPicture> = Vec::new();
+    let mut copied = 0;
+    for (start, end) in img_tags(&lower) {
+        let Some((s, e)) = attr_value(&lower, start, end, "src") else { continue };
+        if !lower[s..e].trim().starts_with("cid:") {
+            continue;
+        }
+        let alt = attr_value(&lower, start, end, "alt").map(|(s, e)| html_escape::decode_html_entities(&html[s..e]).trim().to_string());
+        let stem = alt.filter(|a| !a.is_empty()).unwrap_or_else(|| {
+            let id = content_id(&html[s..e].trim()[4..]);
+            id.split('@').next().unwrap_or_default().to_string()
+        });
+        // a name in the text stands for one picture
+        let mut name = stem.clone();
+        let mut n = 1;
+        while pictures.iter().any(|p| p.name == name) {
+            n += 1;
+            name = format!("{stem} ({n})");
+        }
+        let tag_end = (end + 1).min(html.len());
+        marked.push_str(&html[copied..start]);
+        marked.push_str(&html_escape::encode_text(&format!("[{name}]")));
+        copied = tag_end;
+        pictures.push(TextPicture { name, tag: html[start..tag_end].to_string() });
+    }
+    marked.push_str(&html[copied..]);
+    (html_to_text(&marked), pictures)
+}
+
+/// A token that keeps the content ids of one draft's inline images apart from any other's
+/// (`…@jm-…`).
+pub fn content_id_token() -> String {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    format!("jm-{nanos:x}")
+}
+
+/// Whether Just Mail gave the inline image this content id (a picture or signature logo).
+pub fn is_own_content_id(content_id: &str) -> bool {
+    content_id.contains("@jm-")
 }
 
 /// The marked author block followed by the signature block (if `signature_html` isn't blank,
@@ -779,6 +871,28 @@ mod tests {
         let html = text_to_html(text);
         assert!(html.contains("&lt;spitz&gt;"));
         assert_eq!(html_to_text(&html), text);
+    }
+
+    #[test]
+    fn pictures_roundtrip_through_the_text() {
+        let picture = TextPicture::new("Bild 1.png", "picture.png@jm-1", (1200, 801));
+        assert_eq!(picture.content_id().as_deref(), Some("picture.png@jm-1"));
+        assert!(picture.tag.contains("width=\"600\" height=\"400\""));
+        let text = "Hallo,\n\nhier:\n[Bild 1.png]\n\n[Bild 2.png] ist keins";
+        let html = text_to_html_with(text, std::slice::from_ref(&picture));
+        assert!(html.contains("hier:<br>\n<img src=\"cid:picture.png@jm-1\" alt=\"Bild 1.png\""));
+        assert!(html.contains("[Bild 2.png] ist keins"));
+        let (back, pictures) = html_to_text_with_pictures(&html);
+        assert_eq!(back, text);
+        assert_eq!(pictures, vec![picture]);
+        assert!(is_own_content_id("picture.png@jm-1"));
+
+        // without alt text the content id names it; a name stands for one picture only
+        let (text, pictures) =
+            html_to_text_with_pictures("a<br><img src=\"cid:shot.png@x\"><br><IMG ALT=\"shot.png\" SRC=\"cid:b@x\"><img src=\"logo.png\">");
+        assert_eq!(text, "a\n[shot.png]\n[shot.png (2)]");
+        assert_eq!(pictures[1].tag, "<IMG ALT=\"shot.png\" SRC=\"cid:b@x\">");
+        assert_eq!(text_to_html_with(&text, &pictures), "a<br>\n<img src=\"cid:shot.png@x\"><br>\n<IMG ALT=\"shot.png\" SRC=\"cid:b@x\">");
     }
 
     #[test]

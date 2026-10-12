@@ -3782,6 +3782,7 @@ dependencies = [
  "futures",
  "gpui-kit",
  "html-escape",
+ "image",
  "jm-core",
  "serde",
  "serde_json",

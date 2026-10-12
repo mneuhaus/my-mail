@@ -17,10 +17,12 @@ an MCP server) that share the same accounts. Mail goes through Microsoft Graph o
   accounts. Right-click a mail for reply, pin, read/unread, archive, delete or discard (drafts).
 - **Drafts live on the server.** New mail, replies (in the conversation, above the quote) and
   forwards are Graph drafts; the editor saves while you type. Files attached to a draft open with a
-  click, also when an agent attached them. Your signature is added once and kept out of the text
-  field, so editing never mangles it or the quote. Two HTML signatures per account (taken from
-  Spark): the long one for new mails, the short one for replies and forwards; logos go along as
-  inline images.
+  click, also when an agent attached them. A picture pasted with ⌘V (a screenshot, say) goes out as
+  an inline image where the cursor was: in the text field a line `[Picture 1.png]` stands for it,
+  and deleting that line takes it out again. Copied files become attachments. Your signature is
+  added once and kept out of the text field, so editing never mangles it or the quote. Two HTML
+  signatures per account (taken from Spark): the long one for new mails, the short one for replies
+  and forwards; logos go along as inline images.
 - **Sending only in the app**, from the draft (Send or ⌘↩). The CLI and its MCP server are
   built without the sending code (`jm-core` feature `send`, enabled only for the app): agents can
   prepare drafts, a person sends them.

@@ -10,6 +10,7 @@ mod composer;
 mod i18n;
 mod list;
 mod mailview;
+mod picture;
 mod reader;
 mod setup;
 mod sidebar;

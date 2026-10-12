@@ -484,7 +484,7 @@ impl Mailbox {
     fn signature_parts(&self, with_signature: bool, answer: bool) -> (String, Vec<html::InlineImage>) {
         let block = if answer { self.account.reply_signature_block() } else { self.account.signature_block() };
         match block.filter(|_| with_signature) {
-            Some(signature) => html::inline_data_images(&signature, "signature", &content_id_token()),
+            Some(signature) => html::inline_data_images(&signature, "signature", &html::content_id_token()),
             None => (String::new(), Vec::new()),
         }
     }
@@ -606,6 +606,31 @@ impl Mailbox {
         self.json("POST", &format!("/me/messages/{}/attachments", enc(draft_id)), PREFER_IDS, Some(&file_attachment(file)?))
     }
 
+    /// Attach a picture the author's text shows (`<img src="cid:…">`, see [`html::TextPicture`]).
+    pub fn add_inline_image(&self, draft_id: &str, image: &html::InlineImage) -> Result<Attachment> {
+        self.guard_writable()?;
+        if image.bytes.len() > MAX_ATTACHMENT_BYTES {
+            return Err(Error::validation(format!("{} is larger than 3 MB", image.name)));
+        }
+        self.json("POST", &format!("/me/messages/{}/attachments", enc(draft_id)), PREFER_IDS, Some(&inline_attachment(image)))
+    }
+
+    /// Remove the inline images Just Mail added that the draft no longer shows: pictures whose
+    /// line was taken out of the text. Before sending, so they don't arrive as attachments.
+    pub fn drop_unused_images(&self, draft_id: &str) -> Result<()> {
+        let draft = self.message(draft_id)?;
+        let shown = html::content_ids(draft.body.as_ref().map_or("", |b| &b.content));
+        for attachment in self.attachments(draft_id)? {
+            let Some(id) = attachment.content_id.as_deref().filter(|_| attachment.is_inline).map(html::content_id) else {
+                continue;
+            };
+            if html::is_own_content_id(&id) && !shown.iter().any(|s| s.eq_ignore_ascii_case(&id)) {
+                self.remove_attachment(draft_id, &attachment.id)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn remove_attachment(&self, draft_id: &str, attachment_id: &str) -> Result<()> {
         self.guard_writable()?;
         self.call("DELETE", &format!("/me/messages/{}/attachments/{}", enc(draft_id), enc(attachment_id)), PREFER_IDS, None)?;
@@ -666,12 +691,6 @@ fn inline_attachment(image: &html::InlineImage) -> Value {
         "isInline": true,
         "contentId": image.content_id,
     })
-}
-
-/// A token that keeps the content ids of one draft's inline images apart from any other's.
-fn content_id_token() -> String {
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    format!("jm-{nanos:x}")
 }
 
 fn order_tree(all: Vec<Folder>) -> Vec<Folder> {
