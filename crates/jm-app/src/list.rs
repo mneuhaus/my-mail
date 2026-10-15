@@ -125,22 +125,30 @@ impl MailApp {
             .bg(theme.colors.list)
             .border_r_1()
             .border_color(theme.border)
-            .key_context(actions::LIST)
-            .track_focus(&self.list_focus)
             .child(header)
-            .when_some(self.list_error.clone().filter(|_| count == 0), |d, e| {
-                d.child(div().p_4().text_size(theme::TEXT).text_color(theme.danger).child(e))
-            })
-            .when(empty && self.list_error.is_none(), |d| {
-                d.child(
-                    div()
-                        .p_6()
-                        .text_size(theme::TEXT)
-                        .text_color(theme.muted_foreground)
-                        .child(tr!("Nothing here.", "Hier ist nichts.")),
-                )
-            })
-            .child(list)
+            .child(
+                // the single-key shortcuts belong to the list only: macOS hands a key to a text
+                // field only when no shortcut wants it, so with the search field in here typing
+                // `e` would archive and `c` start a new mail
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .key_context(actions::LIST)
+                    .track_focus(&self.list_focus)
+                    .when_some(self.list_error.clone().filter(|_| count == 0), |d, e| {
+                        d.child(div().p_4().text_size(theme::TEXT).text_color(theme.danger).child(e))
+                    })
+                    .when(empty && self.list_error.is_none(), |d| {
+                        d.child(
+                            div()
+                                .p_6()
+                                .text_size(theme::TEXT)
+                                .text_color(theme.muted_foreground)
+                                .child(tr!("Nothing here.", "Hier ist nichts.")),
+                        )
+                    })
+                    .child(list),
+            )
     }
 
     fn render_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
