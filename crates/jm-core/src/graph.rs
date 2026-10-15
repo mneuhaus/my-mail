@@ -232,6 +232,12 @@ impl Mailbox {
         Ok(order_tree(all))
     }
 
+    /// One folder with its counts (id or well-known name), in one request: for a count that has
+    /// to stay current, where [`Mailbox::folders`] would ask for every folder.
+    pub fn folder(&self, key: &str) -> Result<Folder> {
+        self.get(&format!("/me/mailFolders/{}?$select={FOLDER_FIELDS}", enc(key)))
+    }
+
     /// Ids of the well-known folders, in one batch request.
     fn well_known_ids(&self) -> Result<Vec<(String, String)>> {
         let requests: Vec<Value> = WELL_KNOWN

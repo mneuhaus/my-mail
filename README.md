@@ -12,6 +12,8 @@ an MCP server) that share the same accounts. Mail goes through Microsoft Graph o
   sent along with the mail (logos in signatures) show right away; hidden preview text stays
   hidden. Below a mail comes what followed in its conversation, your own answers and drafts
   included, each with only its new part (Graph's `uniqueBody`).
+- **Unread count on the Dock icon**: unread mail in the inboxes (read-only accounts stay out),
+  current within a minute.
 - **Pin** mail you still have to deal with (Spark's pin, stored as the Outlook follow-up flag, so
   Outlook and phones see it too). Pinned mail sits on top of the inbox; *Pinned* lists it for all
   accounts. Right-click a mail for reply, pin, read/unread, archive, delete or discard (drafts).

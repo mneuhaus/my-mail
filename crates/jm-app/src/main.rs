@@ -7,6 +7,7 @@
 mod actions;
 mod app;
 mod composer;
+mod dock;
 mod i18n;
 mod list;
 mod mailview;

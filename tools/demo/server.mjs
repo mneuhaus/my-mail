@@ -214,6 +214,10 @@ const server = http.createServer((req, res) => {
       }) });
     }
     if (path === "/me/mailFolders") return send(res, 200, { value: box.folders.filter((f) => f.parentFolderId === "root") });
+    if (parts[1] === "mailFolders" && parts.length === 3) {
+      const folder = box.folders.find((f) => f.id === folderId(box, parts[2]));
+      return folder ? send(res, 200, folder) : send(res, 404, { error: { code: "ErrorItemNotFound", message: "not found" } });
+    }
     if (parts[1] === "mailFolders" && parts[3] === "childFolders") {
       return send(res, 200, { value: box.folders.filter((f) => f.parentFolderId === parts[2]) });
     }

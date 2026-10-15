@@ -137,6 +137,8 @@ pub struct MailApp {
     /// The open mail's body and conversation (WebKit); `None` if it could not be made.
     pub mail_view: Option<MailView>,
     last_folder_refresh: Instant,
+    /// The unread count on the Dock icon, as last set.
+    badge: u32,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -190,6 +192,7 @@ impl MailApp {
             menu_target: None,
             mail_view,
             last_folder_refresh: Instant::now(),
+            badge: 0,
             _subscriptions: subscriptions,
         };
         app.reload_accounts(window, cx);
@@ -252,6 +255,8 @@ impl MailApp {
                 show_all_folders: previous.is_some_and(|p| p.show_all_folders),
             });
         }
+        // an account gone or made read-only no longer counts
+        self.update_badge();
         if self.accounts.is_empty() {
             self.view = None;
             self.rows.clear();
@@ -300,7 +305,41 @@ impl MailApp {
                 }
                 Err(e) => account.folders_error = Some(e.to_string()),
             }
+            this.update_badge();
         });
+    }
+
+    /// Count the inbox again (one request), so new mail shows in the sidebar and on the Dock
+    /// icon within a minute, not only with the next round over all folders.
+    fn count_inbox(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let mailbox = self.accounts[ix].mailbox.clone();
+        let id = self.accounts[ix].config.id.clone();
+        self.run(window, cx, move || mailbox.folder("inbox"), move |this, result, _, _| {
+            let (Some(account), Ok(counted)) = (this.accounts.get_mut(ix).filter(|a| a.config.id == id), result) else {
+                return;
+            };
+            if let Some(inbox) = account.folders.iter_mut().find(|f| f.id == counted.id) {
+                inbox.unread_item_count = counted.unread_item_count;
+                inbox.total_item_count = counted.total_item_count;
+                this.update_badge();
+            }
+        });
+    }
+
+    /// Unread mail in the inboxes on the Dock icon. Read-only accounts stay out: their mail is
+    /// read by another system, and nothing here could mark it read.
+    fn update_badge(&mut self) {
+        let unread = self
+            .accounts
+            .iter()
+            .filter(|a| !a.config.read_only)
+            .filter_map(|a| a.folder("inbox"))
+            .map(|f| f.unread_item_count)
+            .sum();
+        if unread != self.badge {
+            self.badge = unread;
+            crate::dock::set_badge(unread);
+        }
     }
 
     // MARK: lists
@@ -518,10 +557,15 @@ impl MailApp {
                     if !this.loading && !this.loading_more && !matches!(this.view, Some(View::Search { .. })) {
                         this.load_list(true, window, cx);
                     }
-                    if this.last_folder_refresh.elapsed() > FOLDER_REFRESH {
+                    let all_folders = this.last_folder_refresh.elapsed() > FOLDER_REFRESH;
+                    if all_folders {
                         this.last_folder_refresh = Instant::now();
-                        for ix in 0..this.accounts.len() {
+                    }
+                    for ix in 0..this.accounts.len() {
+                        if all_folders {
                             this.load_folders(ix, window, cx);
+                        } else {
+                            this.count_inbox(ix, window, cx);
                         }
                     }
                 });
