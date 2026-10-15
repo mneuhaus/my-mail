@@ -25,6 +25,11 @@ an MCP server) that share the same accounts. Mail goes through Microsoft Graph o
   added once and kept out of the text field, so editing never mangles it or the quote. Two HTML
   signatures per account (taken from Spark): the long one for new mails, the short one for replies
   and forwards; logos go along as inline images.
+- **Recipients are chips**: ⌫ takes out a whole recipient, a click shows its address. Typing
+  suggests people from your mail, those you write to first (the recipients of the last 1000 sent
+  mails, the senders of the last 500 in the inbox); `↑/↓` pick, `↩`, `⇥` or a comma take one. A
+  typed address becomes a chip at a comma, with `↩` or when you leave the field. Only the
+  Mail scopes are needed, so no new consent.
 - **Sending only in the app**, from the draft (Send or ⌘↩). The CLI and its MCP server are
   built without the sending code (`jm-core` feature `send`, enabled only for the app): agents can
   prepare drafts, a person sends them.

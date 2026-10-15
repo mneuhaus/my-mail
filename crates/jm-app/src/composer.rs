@@ -19,6 +19,7 @@ use gpui_kit::*;
 use jm_core::{Attachment, DraftInput, Mailbox, Message, NewAttachment, Recipient, html};
 
 use crate::actions::{self, SaveDraft, SendDraft};
+use crate::recipients::RecipientField;
 use crate::sidebar::TOP_H;
 use crate::signature::Preview;
 use crate::{picture, theme, tr, util};
@@ -45,9 +46,9 @@ pub struct Composer {
     /// The draft as last saved; `None` until a new mail is first saved.
     draft: Option<Message>,
     loading: bool,
-    to: Entity<InputState>,
-    cc: Entity<InputState>,
-    bcc: Entity<InputState>,
+    to: Entity<RecipientField>,
+    cc: Entity<RecipientField>,
+    bcc: Entity<RecipientField>,
     subject: Entity<InputState>,
     body: Entity<TextareaState>,
     show_cc: bool,
@@ -80,18 +81,20 @@ pub struct Composer {
 
 impl Composer {
     fn base(account: usize, mailbox: Arc<Mailbox>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let field = |placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>| {
-            cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
+        let recipients = |placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>| {
+            let account = mailbox.account.id.clone();
+            cx.new(|cx| RecipientField::new(account, placeholder, window, cx))
         };
-        let to = field(tr!("Recipients", "Empfänger"), window, cx);
-        let cc = field(tr!("Copy", "Kopie"), window, cx);
-        let bcc = field(tr!("Blind copy", "Blindkopie"), window, cx);
-        let subject = field(tr!("Subject", "Betreff"), window, cx);
+        let to = recipients(tr!("Recipients", "Empfänger"), window, cx);
+        let cc = recipients(tr!("Copy", "Kopie"), window, cx);
+        let bcc = recipients(tr!("Blind copy", "Blindkopie"), window, cx);
+        let subject = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Subject", "Betreff")));
         let body = cx.new(|cx| {
             TextareaState::new(window, cx).auto_grow(8, 100_000).placeholder(tr!("Write your message…", "Deine Nachricht…"))
         });
         let mut subscriptions = Vec::new();
-        for input in [&to, &cc, &bcc, &subject] {
+        let inputs = [&to, &cc, &bcc].map(|field| field.read(cx).input().clone());
+        for input in inputs.iter().chain([&subject]) {
             subscriptions.push(cx.subscribe_in(input, window, |this, _, ev: &InputEvent, window, cx| {
                 if matches!(ev, InputEvent::Change) {
                     this.changed(window, cx);
@@ -194,7 +197,6 @@ impl Composer {
     }
 
     fn fill(&mut self, message: Message, window: &mut Window, cx: &mut Context<Self>) {
-        let join = |list: &[Recipient]| list.iter().map(Recipient::full).collect::<Vec<_>>().join(", ");
         let document = message.body.as_ref().map(|b| b.content.clone()).unwrap_or_default();
         let author = html::author_html(&document).map(str::to_string);
         let markers = author.is_some();
@@ -222,16 +224,15 @@ impl Composer {
         }
         self.has_markers = markers;
         self.show_cc = !message.cc_recipients.is_empty() || !message.bcc_recipients.is_empty();
-        let (to, cc, bcc) = (join(&message.to_recipients), join(&message.cc_recipients), join(&message.bcc_recipients));
         let subject = message.subject.clone().unwrap_or_default();
         // A Just Mail draft shows what follows the text: the signature, then a reply's quote.
         let quote = html::quote_html(&document).filter(|_| markers);
         self.quote = quote.map(|q| html::to_display_markdown(q, false, &[]).into());
         let answer = quote.is_some() || is_answer_subject(&subject);
         self.signature = if markers && html::has_signature(&document) { self.signature_preview(answer, &message.id) } else { None };
-        self.to.update(cx, |s, cx| s.set_value(to, window, cx));
-        self.cc.update(cx, |s, cx| s.set_value(cc, window, cx));
-        self.bcc.update(cx, |s, cx| s.set_value(bcc, window, cx));
+        self.to.update(cx, |f, cx| f.set(&message.to_recipients, window, cx));
+        self.cc.update(cx, |f, cx| f.set(&message.cc_recipients, window, cx));
+        self.bcc.update(cx, |f, cx| f.set(&message.bcc_recipients, window, cx));
         self.subject.update(cx, |s, cx| s.set_value(subject, window, cx));
         self.body.update(cx, |s, cx| s.set_value(text, window, cx));
         if message.has_attachments {
@@ -274,8 +275,8 @@ impl Composer {
     /// Recipients of all three fields; `strict` reports a typo instead of skipping the field.
     fn recipients(&self, cx: &App, strict: bool) -> Result<[Option<Vec<Recipient>>; 3], String> {
         let mut out: [Option<Vec<Recipient>>; 3] = [None, None, None];
-        for (i, input) in [&self.to, &self.cc, &self.bcc].into_iter().enumerate() {
-            match Recipient::parse_list(&Self::value(input, cx)) {
+        for (i, field) in [&self.to, &self.cc, &self.bcc].into_iter().enumerate() {
+            match field.read(cx).recipients(cx) {
                 Ok(list) => out[i] = Some(list),
                 Err(e) if strict => return Err(e.message),
                 Err(_) => {} // still typing: keep what the server has
@@ -817,10 +818,9 @@ impl Render for Composer {
                 )))
             })
             .child(field_row(tr!("From", "Von"), h_flex().h_8().text_size(theme::TEXT).child(account), cx))
-            .child(field_row(tr!("To", "An"), field(&self.to), cx))
+            .child(field_row(tr!("To", "An"), self.to.clone(), cx))
             .when(self.show_cc, |d| {
-                d.child(field_row("Cc", field(&self.cc), cx))
-                    .child(field_row("Bcc", field(&self.bcc), cx))
+                d.child(field_row("Cc", self.cc.clone(), cx)).child(field_row("Bcc", self.bcc.clone(), cx))
             })
             .child(field_row(tr!("Subject", "Betreff"), field(&self.subject), cx))
             .when(!self.attachments.is_empty() || !pictures.is_empty(), |d| d.child(attachments))

@@ -41,10 +41,13 @@ impl Recipient {
         if self.name.trim().is_empty() { &self.address } else { &self.name }
     }
 
-    /// `Name <address>` or just the address.
+    /// `Name <address>` or just the address. A name with a comma (Exchange's `Doe, Jane`) is
+    /// quoted, so a list of them reads back the same.
     pub fn full(&self) -> String {
         if self.name.trim().is_empty() || self.name == self.address {
             self.address.clone()
+        } else if self.name.contains([',', ';', '<', '>', '"']) {
+            format!("\"{}\" <{}>", self.name.replace('"', ""), self.address)
         } else {
             format!("{} <{}>", self.name, self.address)
         }
@@ -58,26 +61,51 @@ impl Recipient {
         }
     }
 
-    /// Parse `a@b.c, Name <d@e.f>; g@h.i` into recipients. Rejects anything without an `@`.
+    /// Parse `a@b.c, Name <d@e.f>; "Doe, Jane" <g@h.i>` into recipients. Rejects anything without
+    /// an `@`.
     pub fn parse_list(input: &str) -> crate::Result<Vec<Recipient>> {
-        let mut out = Vec::new();
-        for part in input.split([',', ';', '\n']) {
-            let part = part.trim();
-            if part.is_empty() {
-                continue;
-            }
-            let (name, address) = match (part.rfind('<'), part.rfind('>')) {
-                (Some(open), Some(close)) if open < close => {
-                    (part[..open].trim().trim_matches('"').to_string(), part[open + 1..close].trim().to_string())
+        Self::list_parts(input)
+            .into_iter()
+            .map(|range| input[range].trim())
+            .filter(|part| !part.is_empty())
+            .map(Self::parse)
+            .collect()
+    }
+
+    /// Where the entries of a list are: it is split at `,`, `;` and line breaks outside quotes and
+    /// `<…>`. Each range ends before its separator; the last one runs to the end.
+    pub fn list_parts(input: &str) -> Vec<std::ops::Range<usize>> {
+        let mut parts = Vec::new();
+        let (mut start, mut quoted, mut angled) = (0, false, false);
+        for (i, c) in input.char_indices() {
+            match c {
+                '"' if !angled => quoted = !quoted,
+                '<' if !quoted => angled = true,
+                '>' if !quoted => angled = false,
+                ',' | ';' | '\n' if !quoted && !angled => {
+                    parts.push(start..i);
+                    start = i + 1;
                 }
-                _ => (String::new(), part.to_string()),
-            };
-            if !address.contains('@') || address.contains(' ') {
-                return Err(crate::Error::validation(format!("'{part}' is not a mail address")));
+                _ => {}
             }
-            out.push(Recipient { name, address });
         }
-        Ok(out)
+        parts.push(start..input.len());
+        parts
+    }
+
+    /// One entry: `a@b.c`, `Name <a@b.c>` or `"Doe, Jane" <a@b.c>`.
+    pub fn parse(part: &str) -> crate::Result<Recipient> {
+        let part = part.trim();
+        let (name, address) = match (part.rfind('<'), part.rfind('>')) {
+            (Some(open), Some(close)) if open < close => {
+                (part[..open].trim().trim_matches('"').trim().to_string(), part[open + 1..close].trim().to_string())
+            }
+            _ => (String::new(), part.to_string()),
+        };
+        if !address.contains('@') || address.contains(char::is_whitespace) {
+            return Err(crate::Error::validation(format!("'{part}' is not a mail address")));
+        }
+        Ok(Recipient { name, address })
     }
 }
 
@@ -306,6 +334,15 @@ mod tests {
         assert_eq!(list.len(), 3);
         assert_eq!(list[1], Recipient { name: "Max M".into(), address: "max@x.de".into() });
         assert!(Recipient::parse_list("not an address").is_err());
+    }
+
+    #[test]
+    fn names_with_commas_survive_the_round_trip() {
+        let doe = Recipient { name: "Doe, Jane".into(), address: "jane@doe.example".into() };
+        let text = format!("{}, a@b.de", doe.full());
+        assert_eq!(text, "\"Doe, Jane\" <jane@doe.example>, a@b.de");
+        assert_eq!(Recipient::parse_list(&text).unwrap(), [doe, Recipient::new("a@b.de")]);
+        assert_eq!(Recipient::list_parts("x@y.z; <a,b@c.d>, "), [0..5, 6..16, 17..18]);
     }
 
     #[test]

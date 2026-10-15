@@ -22,12 +22,15 @@ use jm_core::{AccountConfig, Attachment, Body, Config, FlagStatus, Folder, Mailb
 use crate::actions::{self, *};
 use crate::composer::{Composer, ComposerEvent};
 use crate::mailview::MailView;
+use crate::recipients::AddressBook;
 use crate::setup::{Setup, SetupEvent};
 use crate::{i18n, tr};
 
 const PAGE: u32 = 50;
 const LIST_REFRESH: Duration = Duration::from_secs(60);
 const FOLDER_REFRESH: Duration = Duration::from_secs(300);
+/// People to suggest change slowly: whom you wrote to lately.
+const CONTACTS_REFRESH: Duration = Duration::from_secs(1800);
 
 pub struct Account {
     pub config: AccountConfig,
@@ -137,6 +140,7 @@ pub struct MailApp {
     /// The open mail's body and conversation (WebKit); `None` if it could not be made.
     pub mail_view: Option<MailView>,
     last_folder_refresh: Instant,
+    last_contacts_refresh: Instant,
     /// The unread count on the Dock icon, as last set.
     badge: u32,
     _subscriptions: Vec<Subscription>,
@@ -192,6 +196,7 @@ impl MailApp {
             menu_target: None,
             mail_view,
             last_folder_refresh: Instant::now(),
+            last_contacts_refresh: Instant::now(),
             badge: 0,
             _subscriptions: subscriptions,
         };
@@ -265,6 +270,7 @@ impl MailApp {
         }
         for ix in 0..self.accounts.len() {
             self.load_folders(ix, window, cx);
+            self.load_contacts(ix, window, cx);
         }
         let view_valid = match &self.view {
             Some(View::Folder { account, .. } | View::Search { account, .. }) => *account < self.accounts.len(),
@@ -306,6 +312,20 @@ impl MailApp {
                 Err(e) => account.folders_error = Some(e.to_string()),
             }
             this.update_badge();
+        });
+    }
+
+    /// Whom the account wrote to or heard from, for the recipient suggestions of its drafts.
+    fn load_contacts(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let account = &self.accounts[ix];
+        if account.config.read_only {
+            return;
+        }
+        let mailbox = account.mailbox.clone();
+        let id = account.config.id.clone();
+        self.run(window, cx, move || mailbox.contacts(), move |_, result, _, cx| match result {
+            Ok(list) => AddressBook::set(id, list, cx),
+            Err(e) => eprintln!("no recipient suggestions for {id}: {e}"),
         });
     }
 
@@ -561,7 +581,14 @@ impl MailApp {
                     if all_folders {
                         this.last_folder_refresh = Instant::now();
                     }
+                    let contacts = this.last_contacts_refresh.elapsed() > CONTACTS_REFRESH;
+                    if contacts {
+                        this.last_contacts_refresh = Instant::now();
+                    }
                     for ix in 0..this.accounts.len() {
+                        if contacts {
+                            this.load_contacts(ix, window, cx);
+                        }
                         if all_folders {
                             this.load_folders(ix, window, cx);
                         } else {

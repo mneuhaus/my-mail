@@ -13,6 +13,7 @@ mod list;
 mod mailview;
 mod picture;
 mod reader;
+mod recipients;
 mod setup;
 mod sidebar;
 mod signature;

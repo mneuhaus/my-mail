@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 
 use crate::auth::{self, Token};
 use crate::config::{AccountConfig, Config};
+use crate::contacts::{self, Contact};
 use crate::error::{Error, ErrorCode, Result};
 use crate::html;
 use crate::model::*;
@@ -393,6 +394,29 @@ impl Mailbox {
             value.get("value").cloned().map(serde_json::from_value).transpose()?.unwrap_or_default();
         messages.sort_by_key(Message::date);
         Ok(messages)
+    }
+
+    /// People to suggest as recipients ([`contacts::rank`]): the recipients of the last 1000 sent
+    /// mails and the senders of the last 500 in the inbox.
+    pub fn contacts(&self) -> Result<Vec<Contact>> {
+        let sent = self.newest("sentitems", "toRecipients,ccRecipients,bccRecipients", 4)?;
+        let received = self.newest("inbox", "from", 2)?;
+        Ok(contacts::rank(&sent, &received, &[&self.account.email], Utc::now()))
+    }
+
+    /// The newest `pages` × 250 mails of a folder, with only `fields` and the date.
+    fn newest(&self, folder: &str, fields: &str, pages: usize) -> Result<Vec<Message>> {
+        let mut out = Vec::new();
+        let mut next = Some(format!(
+            "/me/mailFolders/{folder}/messages?$top=250&$select=id,receivedDateTime,{fields}&$orderby=receivedDateTime desc"
+        ));
+        for _ in 0..pages {
+            let Some(url) = next.take() else { break };
+            let page = self.page(&url)?;
+            out.extend(page.messages);
+            next = page.next_link;
+        }
+        Ok(out)
     }
 
     pub fn attachments(&self, id: &str) -> Result<Vec<Attachment>> {
