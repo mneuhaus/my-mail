@@ -135,6 +135,11 @@ impl MailView {
         }
     }
 
+    /// Load the page again with the next [`MailView::show`], even if it shows the same mails.
+    pub fn forget(&mut self) {
+        self.shown = None;
+    }
+
     /// Takes the space the web view should cover; it is put there when this is laid out.
     pub fn element(&self) -> impl IntoElement {
         let (web, placed, visible, covered) =

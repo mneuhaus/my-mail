@@ -65,7 +65,8 @@ Files: `~/.config/just-mail/config.toml` (accounts, signatures, read-only), `acc
 
 `↑/↓` or `j/k` move, `r` reply, `a` reply all, `f` forward, `c`/`⌘N` new, `s` pin, `u` read/unread,
 `e` archive, `⌫` trash, `y` copy id, `/` or `⌘F` search, `⇧⌘N` check mail; in a draft `⌘↩` send and
-`⌘S` save.
+`⌘S` save. `⌘R` reloads everything, as in a browser: settings and sign-ins, folders, the list,
+recipient suggestions and the open mail; an open draft too, unless edits are still on their way.
 
 ## Build
 

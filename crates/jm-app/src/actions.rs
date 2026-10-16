@@ -14,6 +14,7 @@ gpui_kit::actions!(
         ArchiveMessage,
         TrashMessage,
         Refresh,
+        ReloadAll,
         FocusSearch,
         SelectNext,
         SelectPrev,
@@ -31,7 +32,8 @@ pub const COMPOSER: &str = "Composer";
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-n", NewMessage, None),
-        KeyBinding::new("cmd-r", Reply, None),
+        // as in a browser, not Reply as in Apple Mail: `r` replies
+        KeyBinding::new("cmd-r", ReloadAll, None),
         KeyBinding::new("cmd-shift-r", ReplyAll, None),
         KeyBinding::new("cmd-shift-f", Forward, None),
         KeyBinding::new("cmd-shift-l", ToggleFlag, None),

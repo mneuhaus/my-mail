@@ -179,6 +179,14 @@ impl Composer {
         this
     }
 
+    /// Account and id of the draft, if it can be fetched again without losing anything: saved,
+    /// and nothing on its way to the server.
+    pub fn reloadable(&self) -> Option<(String, String)> {
+        let settled = !self.dirty && !self.loading && !self.saving && !self.sending && self.uploading == 0;
+        let draft = self.draft.as_ref().filter(|_| settled && self.waiting.is_empty())?;
+        Some((self.mailbox.account.id.clone(), draft.id.clone()))
+    }
+
     fn run<T: Send + 'static>(
         &mut self,
         window: &mut Window,

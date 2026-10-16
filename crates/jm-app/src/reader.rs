@@ -68,7 +68,7 @@ impl MailApp {
             .border_b_1()
             .border_color(theme.border)
             .window_control_area(WindowControlArea::Drag)
-            .child(tool("reply", IconName::Reply, tr!("Reply (⌘R)", "Antworten (⌘R)"), read_only, cx, |t, w, cx| t.answer(false, false, w, cx)))
+            .child(tool("reply", IconName::Reply, tr!("Reply (R)", "Antworten (R)"), read_only, cx, |t, w, cx| t.answer(false, false, w, cx)))
             .child(tool("reply-all", IconName::ReplyAll, tr!("Reply all (⇧⌘R)", "Allen antworten (⇧⌘R)"), read_only, cx, |t, w, cx| t.answer(true, false, w, cx)))
             .child(tool("forward", IconName::Forward, tr!("Forward (⇧⌘F)", "Weiterleiten (⇧⌘F)"), read_only, cx, |t, w, cx| t.answer(false, true, w, cx)))
             .child(div().w(px(1.)).h(px(18.)).mx_2().bg(theme.border))

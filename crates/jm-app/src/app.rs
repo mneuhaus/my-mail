@@ -286,6 +286,38 @@ impl MailApp {
         cx.notify();
     }
 
+    /// Everything fresh from disk and server (⌘R): settings and sign-ins, folders, the list,
+    /// recipient suggestions and the open mail. An open draft comes again only when it is saved;
+    /// with edits on their way it stays as it is.
+    pub fn reload_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let account_id = |ix: usize| self.accounts.get(ix).map(|a| a.config.id.clone());
+        let open = match &self.pane {
+            Pane::Reader(opened) => account_id(opened.account).map(|a| (a, opened.message.id.clone(), false)),
+            Pane::Composer(composer) => composer.read(cx).reloadable().map(|(a, id)| (a, id, true)),
+            _ => None,
+        };
+        self.reload_accounts(window, cx);
+        if self.accounts.is_empty() {
+            return; // the setup shows
+        }
+        self.last_folder_refresh = Instant::now();
+        self.last_contacts_refresh = Instant::now();
+        self.load_list(false, window, cx);
+        let Some((account, id, draft)) = open else { return };
+        let Some(ix) = self.accounts.iter().position(|a| a.config.id == account) else {
+            self.pane = Pane::Empty;
+            return;
+        };
+        if draft {
+            self.open_draft(ix, id, window, cx);
+        } else {
+            if let Some(view) = &mut self.mail_view {
+                view.forget();
+            }
+            self.open_message(ix, id, window, cx);
+        }
+    }
+
     pub fn open_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let setup = cx.new(|cx| Setup::new(window, cx));
         self._subscriptions.push(cx.subscribe_in(&setup, window, |this, _, ev: &SetupEvent, window, cx| match ev {
@@ -1131,6 +1163,7 @@ impl Render for MailApp {
                     this.load_folders(ix, w, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &ReloadAll, w, cx| this.reload_all(w, cx)))
             .on_action(cx.listener(|this, _: &FocusSearch, w, cx| {
                 this.search.update(cx, |s, cx| s.focus(w, cx));
             }))

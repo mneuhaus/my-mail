@@ -81,6 +81,7 @@ fn menus(cx: &mut App) {
             MenuItem::action(tr!("Move to Trash", "In den Papierkorb"), actions::TrashMessage),
             MenuItem::separator(),
             MenuItem::action(tr!("Check for New Mail", "Neue E-Mails abrufen"), actions::Refresh),
+            MenuItem::action(tr!("Reload Everything", "Alles neu laden"), actions::ReloadAll),
         ]),
     ]);
 }
