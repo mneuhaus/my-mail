@@ -147,6 +147,7 @@ fn main() {
                 cx.quit();
             }
         }
+        dock::allow_badge();
         cx.activate(true);
     });
 }
