@@ -17,6 +17,7 @@ an MCP server) that share the same accounts. Mail goes through Microsoft Graph o
 - **Pin** mail you still have to deal with (Spark's pin, stored as the Outlook follow-up flag, so
   Outlook and phones see it too). Pinned mail sits on top of the inbox; *Pinned* lists it for all
   accounts. Right-click a mail for reply, pin, read/unread, archive, delete or discard (drafts).
+  In the trash, *Move to inbox* (right-click, or the reader's toolbar) takes a mail back.
 - **Drafts live on the server.** New mail, replies (in the conversation, above the quote) and
   forwards are Graph drafts; the editor saves while you type. Files attached to a draft open with a
   click, also when an agent attached them. A picture pasted with ⌘V (a screenshot, say) goes out as

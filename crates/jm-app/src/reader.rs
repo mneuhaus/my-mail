@@ -12,7 +12,7 @@ use gpui_kit::*;
 use jm_core::Recipient;
 use jm_core::html::to_web_document;
 
-use crate::app::{MailApp, Opened, Pane, ThreadMessage, body_html};
+use crate::app::{FileTo, MailApp, Opened, Pane, ThreadMessage, body_html};
 use crate::mailview::{Card, CardHead, Palette, WebMessage};
 use crate::sidebar::TOP_H;
 use crate::{theme, tr, util};
@@ -56,6 +56,7 @@ impl MailApp {
         };
         let m = &opened.message;
         let read_only = self.accounts.get(opened.account).is_none_or(|a| a.config.read_only);
+        let trashed = self.accounts.get(opened.account).is_some_and(|a| a.in_trash(m));
         let flagged = m.is_flagged();
         let short = jm_core::ids::short(&m.id);
 
@@ -86,8 +87,14 @@ impl MailApp {
                     })
                     .on_click(cx.listener(|this, _, w, cx| this.toggle_flag(w, cx))),
             )
-            .child(tool("archive", IconName::Archive, tr!("Archive (E)", "Archivieren (E)"), read_only, cx, |t, w, cx| t.file_away(false, w, cx)))
-            .child(tool("trash", IconName::Trash, tr!("Move to trash (⌫)", "In den Papierkorb (⌫)"), read_only, cx, |t, w, cx| t.file_away(true, w, cx)))
+            .child(tool("archive", IconName::Archive, tr!("Archive (E)", "Archivieren (E)"), read_only, cx, |t, w, cx| t.file_away(FileTo::Archive, w, cx)))
+            .map(|d| {
+                if trashed {
+                    d.child(tool("to-inbox", IconName::Inbox, tr!("Move to inbox", "In den Posteingang"), read_only, cx, |t, w, cx| t.file_away(FileTo::Inbox, w, cx)))
+                } else {
+                    d.child(tool("trash", IconName::Trash, tr!("Move to trash (⌫)", "In den Papierkorb (⌫)"), read_only, cx, |t, w, cx| t.file_away(FileTo::Trash, w, cx)))
+                }
+            })
             .child(tool(
                 "unread",
                 IconName::MailOpen,

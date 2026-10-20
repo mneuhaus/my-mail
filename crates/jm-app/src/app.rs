@@ -44,6 +44,21 @@ impl Account {
     pub fn folder(&self, key: &str) -> Option<&Folder> {
         self.folders.iter().find(|f| f.id == key || f.well_known.as_deref() == Some(key))
     }
+
+    /// Whether `message` lies in the trash (by its own folder, so also in *Pinned* and search).
+    pub fn in_trash(&self, message: &Message) -> bool {
+        let trash = self.folder("deleteditems").map(|f| f.id.as_str());
+        trash.is_some() && message.parent_folder_id.as_deref() == trash
+    }
+}
+
+/// Where [`MailApp::file_away`] puts a mail.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FileTo {
+    Archive,
+    Trash,
+    /// Out of the trash, back to the inbox.
+    Inbox,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -65,6 +80,7 @@ pub enum RowAction {
     Read,
     Archive,
     Trash,
+    MoveToInbox,
     CopyId,
 }
 
@@ -963,13 +979,21 @@ impl MailApp {
         }
     }
 
-    /// Archive (`trash == false`) or trash the target message; the next one gets selected.
-    pub fn file_away(&mut self, trash: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// Archive or trash the target message, or take it out of the trash; the next one gets selected.
+    pub fn file_away(&mut self, to: FileTo, window: &mut Window, cx: &mut Context<Self>) {
         let Some((account, message)) = self.target() else { return };
         if !self.writable(account, window, cx) {
             return;
         }
-        if message.is_draft && !trash {
+        let trashed = self.accounts[account].in_trash(&message);
+        let pointless = match to {
+            FileTo::Archive => message.is_draft,
+            // moved there again it would only vanish from the list until the next load (drafts
+            // are discarded instead)
+            FileTo::Trash => trashed && !message.is_draft,
+            FileTo::Inbox => !trashed || message.is_draft,
+        };
+        if pointless {
             return;
         }
         let id = message.id.clone();
@@ -990,12 +1014,14 @@ impl MailApp {
             cx,
             move || {
                 if is_draft {
-                    mailbox.delete_draft(&id)
-                } else if trash {
-                    mailbox.trash(&id).map(|_| ())
-                } else {
-                    mailbox.archive(&id).map(|_| ())
+                    return mailbox.delete_draft(&id);
                 }
+                match to {
+                    FileTo::Archive => mailbox.archive(&id),
+                    FileTo::Trash => mailbox.trash(&id),
+                    FileTo::Inbox => mailbox.move_to(&id, "inbox"),
+                }
+                .map(|_| ())
             },
             move |this, result, window, cx| match result {
                 Ok(()) => this.load_folders(account, window, cx),
@@ -1003,7 +1029,11 @@ impl MailApp {
                     if let (Some(row), Some(ix)) = (removed, ix) {
                         this.rows.insert(ix.min(this.rows.len()), row);
                     }
-                    let title = if trash { tr!("Could not delete", "Löschen fehlgeschlagen") } else { tr!("Could not archive", "Archivieren fehlgeschlagen") };
+                    let title = match to {
+                        FileTo::Archive => tr!("Could not archive", "Archivieren fehlgeschlagen"),
+                        FileTo::Trash => tr!("Could not delete", "Löschen fehlgeschlagen"),
+                        FileTo::Inbox => tr!("Could not move it to the inbox", "Nicht in den Posteingang verschoben"),
+                    };
                     this.notify_error(title, &e, window, cx);
                 }
             },
@@ -1067,8 +1097,9 @@ impl MailApp {
             RowAction::Forward => self.answer(false, true, window, cx),
             RowAction::Pin => self.toggle_flag(window, cx),
             RowAction::Read => self.toggle_read(window, cx),
-            RowAction::Archive => self.file_away(false, window, cx),
-            RowAction::Trash => self.file_away(true, window, cx),
+            RowAction::Archive => self.file_away(FileTo::Archive, window, cx),
+            RowAction::Trash => self.file_away(FileTo::Trash, window, cx),
+            RowAction::MoveToInbox => self.file_away(FileTo::Inbox, window, cx),
             RowAction::CopyId => self.copy_id(window, cx),
         }
         self.menu_target = None;
@@ -1154,8 +1185,8 @@ impl Render for MailApp {
             .on_action(cx.listener(|this, _: &Forward, w, cx| this.answer(false, true, w, cx)))
             .on_action(cx.listener(|this, _: &ToggleFlag, w, cx| this.toggle_flag(w, cx)))
             .on_action(cx.listener(|this, _: &ToggleRead, w, cx| this.toggle_read(w, cx)))
-            .on_action(cx.listener(|this, _: &ArchiveMessage, w, cx| this.file_away(false, w, cx)))
-            .on_action(cx.listener(|this, _: &TrashMessage, w, cx| this.file_away(true, w, cx)))
+            .on_action(cx.listener(|this, _: &ArchiveMessage, w, cx| this.file_away(FileTo::Archive, w, cx)))
+            .on_action(cx.listener(|this, _: &TrashMessage, w, cx| this.file_away(FileTo::Trash, w, cx)))
             .on_action(cx.listener(|this, _: &CopyId, w, cx| this.copy_id(w, cx)))
             .on_action(cx.listener(|this, _: &actions::Refresh, w, cx| {
                 this.load_list(true, w, cx);

@@ -279,6 +279,7 @@ impl MailApp {
         let pinned = row.message.is_flagged();
         let read = row.message.is_read;
         let read_only = self.accounts.get(row.account).is_none_or(|a| a.config.read_only);
+        let trashed = self.accounts.get(row.account).is_some_and(|a| a.in_trash(&row.message));
         let app = cx.entity().downgrade();
         move |menu, window, cx| {
             // reaching into the reader, the menu would lie under the mail: the mail goes while it is open
@@ -319,8 +320,13 @@ impl MailApp {
             menu = if draft {
                 menu.item(item(tr!("Discard draft", "Entwurf verwerfen"), IconName::Trash, RowAction::Trash, writable))
             } else {
-                menu.item(item(tr!("Archive", "Archivieren"), IconName::Archive, RowAction::Archive, writable))
-                    .item(item(tr!("Delete", "Löschen"), IconName::Trash, RowAction::Trash, writable))
+                menu.item(item(tr!("Archive", "Archivieren"), IconName::Archive, RowAction::Archive, writable)).item(
+                    if trashed {
+                        item(tr!("Move to inbox", "In den Posteingang"), IconName::Inbox, RowAction::MoveToInbox, writable)
+                    } else {
+                        item(tr!("Delete", "Löschen"), IconName::Trash, RowAction::Trash, writable)
+                    },
+                )
             };
             menu.separator().item(item(tr!("Copy id for jm", "ID für jm kopieren"), IconName::Copy, RowAction::CopyId, true))
         }
