@@ -228,6 +228,13 @@ impl MailApp {
         self.list_focus.focus(window, cx);
     }
 
+    /// Take the keyboard back from the mail's web view, if it has it.
+    fn release_keyboard(&self, cx: &App) {
+        if let Some(view) = &self.mail_view {
+            view.release_keyboard(cx);
+        }
+    }
+
     /// Run blocking core work on a background thread, then `done` on the UI thread.
     pub fn run<T: Send + 'static>(
         &mut self,
@@ -1196,8 +1203,11 @@ impl Render for MailApp {
             }))
             .on_action(cx.listener(|this, _: &ReloadAll, w, cx| this.reload_all(w, cx)))
             .on_action(cx.listener(|this, _: &FocusSearch, w, cx| {
+                this.release_keyboard(cx); // ⌘F or `/` in the mail: the search gets the keys
                 this.search.update(cx, |s, cx| s.focus(w, cx));
             }))
+            // GPUI only sees clicks outside the mail: whatever was clicked gets the keys
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| this.release_keyboard(cx)))
             .on_action(cx.listener(|this, _: &SelectNext, w, cx| this.select_offset(1, w, cx)))
             .on_action(cx.listener(|this, _: &SelectPrev, w, cx| this.select_offset(-1, w, cx)))
             .child(sidebar)

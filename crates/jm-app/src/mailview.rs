@@ -94,20 +94,27 @@ impl MailView {
         Ok((view, rx))
     }
 
-    /// Hide the web view and give the keyboard back to the window (clicked into, the web view
-    /// keeps it, and the editor that comes next would get no keys).
+    /// Hide the web view and give the keyboard back to the window (the editor that comes next
+    /// would get no keys).
     pub fn hide(&self, cx: &App) {
         if self.visible.replace(false) {
             let _ = self.web.set_visible(false);
-            // AppKit tells the window at once, and the window would update the app while it is
-            // being updated: later, outside of it
-            let web = self.web.clone();
-            cx.foreground_executor()
-                .spawn(async move {
-                    let _ = web.focus_parent();
-                })
-                .detach();
+            self.release_keyboard(cx);
         }
+    }
+
+    /// Give the keyboard back to the window. Clicked into, the web view keeps it, also when the
+    /// app is clicked next (GPUI's view does not take it back): what is typed into the search
+    /// would go to the page, which passes it on as shortcuts.
+    pub fn release_keyboard(&self, cx: &App) {
+        // AppKit tells the window at once, and the window would update the app while it is
+        // being updated: later, outside of it
+        let web = self.web.clone();
+        cx.foreground_executor()
+            .spawn(async move {
+                let _ = web.focus_parent();
+            })
+            .detach();
     }
 
     /// GPUI cannot draw over the web view: while the returned guard lives, it stays hidden, if an
