@@ -72,6 +72,11 @@ impl RecipientField {
         self.input.update(cx, |s, cx| s.focus(window, cx));
     }
 
+    /// Whether its suggestions show (they hang over what lies below the field).
+    pub fn suggesting(&self) -> bool {
+        !self.suggestions.is_empty()
+    }
+
     /// Show `list` as chips (a draft as loaded).
     pub fn set(&mut self, list: &[Recipient], window: &mut Window, cx: &mut Context<Self>) {
         let mut text = String::new();

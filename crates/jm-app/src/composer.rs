@@ -1,9 +1,11 @@
 //! The draft editor. Every draft lives on the server (Drafts folder), so the CLI, Outlook and
 //! this window all see the same thing. Edits are saved two seconds after the last keystroke.
 //!
-//! The body field holds only the author's part: the signature and a reply's quote stay in the
-//! draft's HTML untouched (see `jm_core::html`). A pasted picture stands in it as a line
-//! `[Bild 1.png]` and goes out at that place as an inline image of the draft.
+//! The text is rich text in WebKit (see `editor`): it holds only the author's part, as HTML, so
+//! bold, lists, tables and pictures stay as they are, whoever wrote them (an agent through `jm`
+//! too). The signature and a reply's quote stay in the draft's HTML untouched (see
+//! `jm_core::html`). A pasted picture goes in where the cursor is and out as an inline image of
+//! the draft.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,26 +13,23 @@ use std::time::Duration;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_kit::component::text::TextView;
+use gpui_kit::component::input::{IndentInline, Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, Selectable as _, Sizable, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use jm_core::html::InlineImage;
 use jm_core::{Attachment, DraftInput, Mailbox, Message, NewAttachment, Recipient, html};
 
 use crate::actions::{self, SaveDraft, SendDraft};
+use crate::editor::{self, EditorEvent, EditorMessage};
+use crate::mailview::{Cover, MailView, Palette};
 use crate::recipients::RecipientField;
 use crate::sidebar::TOP_H;
-use crate::signature::Preview;
 use crate::{picture, theme, tr, util};
 
 const AUTOSAVE: Duration = Duration::from_secs(2);
-
-/// A picture in the text.
-struct Picture {
-    text: html::TextPicture,
-    preview: Option<Arc<Image>>,
-}
+/// How long Send waits for the page to report the last keystrokes before it goes on anyway.
+const FLUSH_WAIT: Duration = Duration::from_millis(800);
 
 pub enum ComposerEvent {
     Saved { account: usize, message: Box<Message> },
@@ -50,37 +49,59 @@ pub struct Composer {
     cc: Entity<RecipientField>,
     bcc: Entity<RecipientField>,
     subject: Entity<InputState>,
-    body: Entity<TextareaState>,
     show_cc: bool,
     attachments: Vec<Attachment>,
-    pictures: Vec<Picture>,
-    /// Pasted pictures waiting for the draft to exist.
-    waiting: Vec<html::InlineImage>,
-    /// Pictures and files on their way into the draft.
-    uploading: usize,
-    /// Draft written by Just Mail (body field = author's part only).
-    has_markers: bool,
-    /// The signature as it goes out, shown below the text (long for new mails, short for answers).
-    signature: Option<Preview>,
-    /// The quoted mail of a reply or forward (Markdown), shown below the signature on request.
-    quote: Option<SharedString>,
-    show_quote: bool,
+    /// The web view the text is edited in (`None`: WebKit could not start).
+    view: Option<MailView>,
+    /// This composer's editor page (see `editor::next_page`), whether it is dark, and whether its
+    /// script runs.
+    page: u64,
+    page_dark: Option<bool>,
+    page_ready: bool,
+    /// Put the cursor into the text once the page shows.
+    focus_text: bool,
+    /// The author's part as the page last reported it.
+    body_html: String,
     /// Body as last saved, to tell whether it needs saving.
     saved_html: String,
+    /// The pictures of the text as `data:` URLs, by content id (lowercase).
+    pictures: Vec<(String, String)>,
+    /// Names given to pasted pictures (`Bild 1.png`, …).
+    picture_names: Vec<String>,
+    /// Pasted pictures waiting for the draft to exist.
+    waiting: Vec<InlineImage>,
+    /// Pictures and files on their way into the draft.
+    uploading: usize,
+    /// Draft written by Just Mail (the text is the author's part only).
+    has_markers: bool,
+    /// The signature as it goes out, shown below the text (long for new mails, short for answers).
+    signature: Option<String>,
+    /// The quoted mail of a reply or forward, shown below the signature on request.
+    quote: Option<String>,
     dirty: bool,
     saving: bool,
     sending: bool,
+    /// Send once the page reported its last keystrokes.
+    send_after_flush: bool,
     /// Send as soon as the running save and uploads finish.
     send_after_save: bool,
     /// Bumped on every edit; autosave only fires for the latest one.
     edits: u64,
     error: Option<String>,
+    /// Keeps the web view hidden while recipient suggestions hang over it.
+    cover: Option<Cover>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 
 impl Composer {
-    fn base(account: usize, mailbox: Arc<Mailbox>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn base(
+        account: usize,
+        mailbox: Arc<Mailbox>,
+        view: Option<MailView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let recipients = |placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>| {
             let account = mailbox.account.id.clone();
             cx.new(|cx| RecipientField::new(account, placeholder, window, cx))
@@ -89,9 +110,6 @@ impl Composer {
         let cc = recipients(tr!("Copy", "Kopie"), window, cx);
         let bcc = recipients(tr!("Blind copy", "Blindkopie"), window, cx);
         let subject = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Subject", "Betreff")));
-        let body = cx.new(|cx| {
-            TextareaState::new(window, cx).auto_grow(8, 100_000).placeholder(tr!("Write your message…", "Deine Nachricht…"))
-        });
         let mut subscriptions = Vec::new();
         let inputs = [&to, &cc, &bcc].map(|field| field.read(cx).input().clone());
         for input in inputs.iter().chain([&subject]) {
@@ -101,11 +119,17 @@ impl Composer {
                 }
             }));
         }
-        subscriptions.push(cx.subscribe_in(&body, window, |this, _, ev: &InputEvent, window, cx| {
-            if matches!(ev, InputEvent::Change) {
-                this.changed(window, cx);
+        // ↩ in the subject goes on to the text
+        subscriptions.push(cx.subscribe_in(&subject, window, |this, _, ev: &InputEvent, window, cx| {
+            if matches!(ev, InputEvent::PressEnter { .. }) {
+                this.focus_text(window, cx);
             }
         }));
+        // shown by the reader until now: the text field gets it once its page is there, and the
+        // keyboard goes to the fields meanwhile
+        if let Some(view) = &view {
+            view.hide(cx);
+        }
         Self {
             account,
             mailbox,
@@ -115,46 +139,66 @@ impl Composer {
             cc,
             bcc,
             subject,
-            body,
             show_cc: false,
             attachments: Vec::new(),
+            view,
+            page: editor::next_page(),
+            page_dark: None,
+            page_ready: false,
+            focus_text: false,
+            body_html: String::new(),
+            saved_html: String::new(),
             pictures: Vec::new(),
+            picture_names: Vec::new(),
             waiting: Vec::new(),
             uploading: 0,
             has_markers: true,
             signature: None,
             quote: None,
-            show_quote: false,
-            saved_html: String::new(),
             dirty: false,
             saving: false,
             sending: false,
+            send_after_flush: false,
             send_after_save: false,
             edits: 0,
             error: None,
+            cover: None,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
     }
 
     /// A new, empty mail.
-    pub fn blank(account: usize, mailbox: Arc<Mailbox>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut this = Self::base(account, mailbox, window, cx);
-        this.signature = this.signature_preview(false, "new");
+    pub fn blank(
+        account: usize,
+        mailbox: Arc<Mailbox>,
+        view: Option<MailView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::base(account, mailbox, view, window, cx);
+        this.signature = this.signature_html(false);
+        this.load_page(cx);
         this.to.update(cx, |s, cx| s.focus(window, cx));
         this
     }
 
-    /// Preview of the account signature a new mail (`answer == false`) or a reply gets.
-    fn signature_preview(&self, answer: bool, key: &str) -> Option<Preview> {
+    /// The account signature a new mail (`answer == false`) or a reply gets.
+    fn signature_html(&self, answer: bool) -> Option<String> {
         let account = &self.mailbox.account;
-        let block = if answer { account.reply_signature_block() } else { account.signature_block() }?;
-        Some(Preview::new(format!("compose-signature-{}-{key}", account.id), &block))
+        if answer { account.reply_signature_block() } else { account.signature_block() }
     }
 
     /// An existing draft, fetched first.
-    pub fn existing(account: usize, mailbox: Arc<Mailbox>, id: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut this = Self::base(account, mailbox.clone(), window, cx);
+    pub fn existing(
+        account: usize,
+        mailbox: Arc<Mailbox>,
+        view: Option<MailView>,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::base(account, mailbox.clone(), view, window, cx);
         this.loading = true;
         this.run(window, cx, move || mailbox.message(&id), |this, result, window, cx| {
             this.loading = false;
@@ -167,14 +211,20 @@ impl Composer {
     }
 
     /// A draft that was just created (reply, forward).
-    pub fn loaded(account: usize, mailbox: Arc<Mailbox>, draft: Message, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut this = Self::base(account, mailbox, window, cx);
+    pub fn loaded(
+        account: usize,
+        mailbox: Arc<Mailbox>,
+        view: Option<MailView>,
+        draft: Message,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::base(account, mailbox, view, window, cx);
         let forward = draft.to_recipients.is_empty();
+        this.focus_text = !forward;
         this.fill(draft, window, cx);
         if forward {
             this.to.update(cx, |s, cx| s.focus(window, cx));
-        } else {
-            this.body.update(cx, |s, cx| s.focus(window, cx));
         }
         this
     }
@@ -208,26 +258,17 @@ impl Composer {
         let document = message.body.as_ref().map(|b| b.content.clone()).unwrap_or_default();
         let author = html::author_html(&document).map(str::to_string);
         let markers = author.is_some();
-        let (text, pictures) = match &author {
-            Some(author) => html::html_to_text_with_pictures(author),
-            None => (html::html_to_text(&document), Vec::new()),
-        };
-        self.saved_html = html::text_to_html_with(&text, &pictures);
-        self.pictures = pictures.into_iter().map(|text| Picture { text, preview: None }).collect();
-        if let Some(author) = author.filter(|_| !self.pictures.is_empty()) {
+        // written elsewhere: its body, without the looks Outlook or Word gave it
+        self.body_html = author.unwrap_or_else(|| html::clean_for_editing(&document, true));
+        self.saved_html = self.body_html.clone();
+        if !html::content_ids(&self.body_html).is_empty() {
             let mailbox = self.mailbox.clone();
-            let id = message.id.clone();
-            let previews = move || {
-                let images = mailbox.inline_images(&id, &author)?;
-                Ok(images.into_iter().filter_map(|i| Some((i.content_id, picture::preview_of(&i.bytes)?))).collect::<Vec<_>>())
-            };
-            self.run(window, cx, previews, |this, result, _, _| {
-                for (id, preview) in result.unwrap_or_default() {
-                    let shown = this.pictures.iter_mut().find(|p| p.text.content_id().is_some_and(|c| c.eq_ignore_ascii_case(&id)));
-                    if let Some(picture) = shown {
-                        picture.preview = Some(preview);
-                    }
-                }
+            let (id, body) = (message.id.clone(), self.body_html.clone());
+            self.run(window, cx, move || mailbox.inline_images(&id, &body), |this, result, _, _| {
+                let found: Vec<(String, String)> =
+                    result.unwrap_or_default().iter().map(|i| (i.content_id.to_lowercase(), html::data_url(i))).collect();
+                this.show_pictures(&found);
+                this.pictures.extend(found);
             });
         }
         self.has_markers = markers;
@@ -235,14 +276,13 @@ impl Composer {
         let subject = message.subject.clone().unwrap_or_default();
         // A Just Mail draft shows what follows the text: the signature, then a reply's quote.
         let quote = html::quote_html(&document).filter(|_| markers);
-        self.quote = quote.map(|q| html::to_display_markdown(q, false, &[]).into());
+        self.quote = quote.map(|q| html::to_web_document(q, &[]));
         let answer = quote.is_some() || is_answer_subject(&subject);
-        self.signature = if markers && html::has_signature(&document) { self.signature_preview(answer, &message.id) } else { None };
+        self.signature = if markers && html::has_signature(&document) { self.signature_html(answer) } else { None };
         self.to.update(cx, |f, cx| f.set(&message.to_recipients, window, cx));
         self.cc.update(cx, |f, cx| f.set(&message.cc_recipients, window, cx));
         self.bcc.update(cx, |f, cx| f.set(&message.bcc_recipients, window, cx));
         self.subject.update(cx, |s, cx| s.set_value(subject, window, cx));
-        self.body.update(cx, |s, cx| s.set_value(text, window, cx));
         if message.has_attachments {
             let mailbox = self.mailbox.clone();
             let id = message.id.clone();
@@ -253,7 +293,82 @@ impl Composer {
             });
         }
         self.draft = Some(message);
+        self.load_page(cx);
         cx.notify();
+    }
+
+    /// Show the text in the editor's page; again after a change of the theme, with what was
+    /// typed so far.
+    fn load_page(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = &self.view else { return };
+        let palette = Palette::of(cx);
+        let content = editor::Content {
+            page: self.page,
+            html: &self.body_html,
+            pictures: &self.pictures,
+            signature: self.signature.as_deref(),
+            quote: self.quote.as_deref(),
+            focus: self.focus_text,
+        };
+        view.load(&editor::page(&content, &palette));
+        if std::mem::take(&mut self.focus_text) {
+            view.focus(cx);
+        }
+        self.page_dark = Some(palette.dark);
+        self.page_ready = false;
+    }
+
+    /// Pictures of the text whose bytes came: shown, if the page is there (else it gets them
+    /// once it is, see `EditorEvent::Ready`).
+    fn show_pictures(&self, found: &[(String, String)]) {
+        if let Some(view) = self.view.as_ref().filter(|_| self.page_ready && !found.is_empty()) {
+            let map: std::collections::HashMap<&str, &str> = found.iter().map(|(id, url)| (id.as_str(), url.as_str())).collect();
+            view.evaluate(&editor::call("pictures", map));
+        }
+    }
+
+    /// What the editor's page reports.
+    pub fn on_editor(&mut self, message: EditorMessage, window: &mut Window, cx: &mut Context<Self>) {
+        if message.page != self.page {
+            return; // an earlier draft's page, still talking
+        }
+        match message.event {
+            EditorEvent::Ready => {
+                self.page_ready = true;
+                self.show_pictures(&self.pictures);
+            }
+            EditorEvent::Edited { html } => {
+                if html != self.body_html {
+                    self.body_html = html;
+                    self.changed(window, cx);
+                }
+            }
+            // the keyboard is in the text: ⌘↩ and ⌘S are the composer's, ⌘V no field's
+            EditorEvent::Focused => self.focus.focus(window, cx),
+            EditorEvent::Paste => self.paste(window, cx),
+            EditorEvent::Flushed => {
+                if std::mem::take(&mut self.send_after_flush) {
+                    self.send_checked(window, cx);
+                }
+            }
+        }
+    }
+
+    /// Put the keyboard into the text.
+    fn focus_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(view) = &self.view {
+            self.focus.focus(window, cx);
+            view.focus(cx);
+            view.evaluate(&editor::call("focus", ()));
+        }
+    }
+
+    /// A toolbar button: `command` on the selection in the text, which keeps the keyboard.
+    fn format(&mut self, command: &str, cx: &mut Context<Self>) {
+        if let Some(view) = &self.view {
+            view.focus(cx);
+            view.evaluate(&editor::call("command", command));
+        }
     }
 
     fn changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -274,10 +389,6 @@ impl Composer {
 
     fn value(input: &Entity<InputState>, cx: &App) -> String {
         input.read(cx).value().trim().to_string()
-    }
-
-    fn body_text(&self, cx: &App) -> String {
-        self.body.read(cx).value().to_string()
     }
 
     /// Recipients of all three fields; `strict` reports a typo instead of skipping the field.
@@ -307,14 +418,13 @@ impl Composer {
                 return;
             }
         };
-        let body = self.body_text(cx);
+        let body_html = self.body_html.clone();
         let subject = Self::value(&self.subject, cx);
         let is_new = self.draft.is_none();
-        if is_new && body.trim().is_empty() && subject.is_empty() && to.as_ref().is_none_or(|t| t.is_empty()) {
+        let no_text = html::html_to_text(&body_html).trim().is_empty() && html::content_ids(&body_html).is_empty();
+        if is_new && no_text && subject.is_empty() && to.as_ref().is_none_or(|t| t.is_empty()) {
             return; // nothing worth a draft yet
         }
-        let pictures: Vec<html::TextPicture> = self.pictures.iter().map(|p| p.text.clone()).collect();
-        let body_html = html::text_to_html_with(&body, &pictures);
         let input = DraftInput {
             to,
             cc,
@@ -368,8 +478,31 @@ impl Composer {
         );
     }
 
-    /// Send right away (no confirmation): saves pending edits first.
+    /// Send right away (no confirmation), once the page reported the last keystrokes.
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sending || self.loading || self.send_after_flush {
+            return;
+        }
+        let Some(view) = &self.view else {
+            self.send_checked(window, cx);
+            return;
+        };
+        self.send_after_flush = true;
+        view.evaluate(&editor::call("flush", ()));
+        // a page that does not answer must not keep the mail from going out
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(FLUSH_WAIT).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if std::mem::take(&mut this.send_after_flush) {
+                    this.send_checked(window, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Send, saving pending edits first.
+    fn send_checked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.sending || self.loading {
             return;
         }
@@ -503,61 +636,59 @@ impl Composer {
         );
     }
 
-    /// ⌘V with a picture or copied files: a picture goes into the text where the cursor is,
-    /// files become attachments. Text is left to the field (`false`).
-    fn paste(&mut self, item: &ClipboardItem, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let mut paths = Vec::new();
-        let mut images = Vec::new();
-        for entry in item.entries() {
+    /// ⌘V in the text: copied files become attachments, a picture goes in where the cursor is,
+    /// HTML without the looks it brought along, text as text.
+    fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.view.clone() else { return };
+        let (mut paths, mut images, mut text) = (Vec::new(), Vec::new(), None);
+        for entry in cx.read_from_clipboard().iter().flat_map(|item| item.entries().to_vec()) {
             match entry {
                 ClipboardEntry::ExternalPaths(p) => paths.extend_from_slice(p.paths()),
-                ClipboardEntry::Image(image) => images.push(image.clone()),
-                ClipboardEntry::String(_) => {}
+                ClipboardEntry::Image(image) => images.push(image),
+                ClipboardEntry::String(s) => text = Some(s.text().clone()),
             }
         }
         if !paths.is_empty() {
             self.add_files(paths, window, cx);
-            return true;
+            return;
         }
-        for image in &images {
-            self.paste_picture(image, window, cx);
+        // a picture copied from a web page comes as HTML too, with nothing but the picture in it
+        let html = editor::pasteboard_html()
+            .map(|h| html::clean_for_editing(&h, false))
+            .filter(|h| !html::html_to_text(h).trim().is_empty());
+        if html.is_none() && !images.is_empty() {
+            for image in &images {
+                self.paste_picture(image, window, cx);
+            }
+        } else if let Some(markup) = html.or_else(|| text.map(|t| html::text_to_html(&t))) {
+            view.evaluate(&editor::call("insert", markup));
         }
-        !images.is_empty()
     }
 
-    /// The picture's line goes in right away; the picture follows once it is ready (converted,
-    /// shrunk if need be) and goes into the draft as soon as there is one.
+    /// The picture goes into the text once it is ready (converted, shrunk if need be), and into
+    /// the draft as soon as there is one.
     fn paste_picture(&mut self, image: &Image, window: &mut Window, cx: &mut Context<Self>) {
         let extension = picture::extension(image.format());
-        let name = self.picture_name(extension, cx);
-        let (text, range) = {
-            let body = self.body.read(cx);
-            (body.value(), body.selected_range())
-        };
-        let mut line = format!("[{name}]");
-        if !(text[..range.start].is_empty() || text[..range.start].ends_with('\n')) {
-            line.insert(0, '\n');
-        }
-        if !text[range.end..].starts_with('\n') {
-            line.push('\n');
-        }
-        self.body.update(cx, |s, cx| s.replace(line, window, cx));
+        let name = self.picture_name(extension);
+        self.picture_names.push(name.clone());
         self.uploading += 1;
         let (format, bytes) = (image.format(), image.bytes().to_vec());
         let prepare = move || picture::prepare(format, bytes).map_err(jm_core::Error::general);
         self.run(window, cx, prepare, move |this, result, window, cx| match result {
             Ok(prepared) => {
                 let content_id = format!("picture.{extension}@{}", html::content_id_token());
-                let text = html::TextPicture::new(&name, &content_id, prepared.size);
-                this.pictures.push(Picture { text, preview: prepared.preview });
-                // in the order of the text, whichever got ready first
-                let body = this.body_text(cx);
-                this.pictures.sort_by_key(|p| body.find(&p.text.marker()).unwrap_or(usize::MAX));
-                let content_type = prepared.content_type.to_string();
-                this.waiting.push(html::InlineImage { content_id, name, content_type, bytes: prepared.bytes });
+                let image =
+                    InlineImage { content_id: content_id.clone(), name, content_type: prepared.content_type.into(), bytes: prepared.bytes };
+                let url = html::data_url(&image);
+                // shown from its bytes, `cid:` again in what the page reports
+                let tag = html::picture_tag(&image.name, &content_id, prepared.size)
+                    .replacen(&format!("src=\"cid:{content_id}\""), &format!("src=\"{url}\" data-cid=\"{content_id}\""), 1);
+                if let Some(view) = &this.view {
+                    view.evaluate(&editor::call("insert", tag));
+                }
+                this.pictures.push((content_id.to_lowercase(), url));
+                this.waiting.push(image);
                 this.upload_waiting(window, cx);
-                // the line now stands for the picture
-                this.changed(window, cx);
             }
             Err(e) => {
                 this.upload_failed(format!("{name}: {e}"));
@@ -567,12 +698,14 @@ impl Composer {
     }
 
     /// `Bild 1.png`, `Bild 2.png`, …: a name the draft doesn't use yet.
-    fn picture_name(&self, extension: &str, cx: &App) -> String {
-        let text = self.body_text(cx);
+    fn picture_name(&self, extension: &str) -> String {
         let stem = tr!("Picture", "Bild");
         (1..)
             .map(|n| format!("{stem} {n}.{extension}"))
-            .find(|name| !text.contains(&format!("[{name}]")) && !self.pictures.iter().any(|p| &p.text.name == name))
+            .find(|name| {
+                let alt = format!("alt=\"{}\"", html_escape::encode_double_quoted_attribute(name));
+                !self.body_html.contains(&alt) && !self.picture_names.contains(name)
+            })
             .unwrap_or_default()
     }
 
@@ -588,13 +721,14 @@ impl Composer {
         for image in std::mem::take(&mut self.waiting) {
             let mailbox = self.mailbox.clone();
             let id = id.clone();
-            let name = image.name.clone();
+            let (name, content_id) = (image.name.clone(), image.content_id.clone());
             self.run(window, cx, move || mailbox.add_inline_image(&id, &image), move |this, result, window, cx| {
                 if let Err(e) = result {
                     this.upload_failed(format!("{name}: {e}"));
-                    // its line stays as text, with no picture behind it
-                    this.pictures.retain(|p| p.text.name != name);
-                    this.changed(window, cx);
+                    // out of the text: the mail would show it broken
+                    if let Some(view) = &this.view {
+                        view.evaluate(&editor::call("drop", content_id));
+                    }
                 }
                 this.uploaded(window, cx);
             });
@@ -611,7 +745,7 @@ impl Composer {
         self.uploading = self.uploading.saturating_sub(1);
         if self.uploading == 0 && self.send_after_save && !self.saving {
             self.send_after_save = false;
-            self.send(window, cx);
+            self.send_checked(window, cx);
         }
         cx.notify();
     }
@@ -685,6 +819,28 @@ impl Render for Composer {
         let theme = cx.theme().clone();
         let busy = self.sending || self.loading;
         let account = self.mailbox.account.email.clone();
+        // the page has the colors of the theme it was made for
+        if self.page_dark.is_some_and(|dark| dark != theme.mode.is_dark()) {
+            self.load_page(cx);
+        }
+        // GPUI cannot draw over the web view: while suggestions hang over it, it stays hidden
+        let suggesting = [&self.to, &self.cc, &self.bcc].iter().any(|f| f.read(cx).suggesting());
+        if !suggesting {
+            self.cover = None;
+        } else if self.cover.is_none() {
+            self.cover = self.view.as_ref().and_then(|v| v.cover(px(f32::MAX)));
+        }
+
+        let no_text = busy || self.view.is_none();
+        let format = |id: &'static str, icon: IconName, tip: &'static str, command: &'static str| {
+            Button::new(id)
+                .ghost()
+                .small()
+                .icon(icon)
+                .tooltip(tip)
+                .disabled(no_text)
+                .on_click(cx.listener(move |this, _, _, cx| this.format(command, cx)))
+        };
         let toolbar = h_flex()
             .h(px(TOP_H))
             .flex_none()
@@ -723,6 +879,21 @@ impl Render for Composer {
                         this.show_cc = !this.show_cc;
                         cx.notify();
                     })),
+            )
+            .child(div().w(px(1.)).h(px(18.)).mx_1().bg(theme.border))
+            .child(
+                h_flex()
+                    .gap_0p5()
+                    .child(format("bold", IconName::Bold, tr!("Bold (⌘B)", "Fett (⌘B)"), "bold"))
+                    .child(format("italic", IconName::Italic, tr!("Italic (⌘I)", "Kursiv (⌘I)"), "italic"))
+                    .child(format("underline", IconName::Underline, tr!("Underline (⌘U)", "Unterstrichen (⌘U)"), "underline"))
+                    .child(format("bullets", IconName::List, tr!("Bulleted list (⇧⌘8)", "Aufzählung (⇧⌘8)"), "insertUnorderedList"))
+                    .child(format(
+                        "numbers",
+                        IconName::ListOrdered,
+                        tr!("Numbered list (⇧⌘7)", "Nummerierte Liste (⇧⌘7)"),
+                        "insertOrderedList",
+                    )),
             )
             .child(div().flex_1().text_size(theme::TEXT_SMALL).text_color(theme.muted_foreground).child(self.status()))
             .child(
@@ -780,34 +951,23 @@ impl Render for Composer {
                     .on_click(cx.listener(move |this, _, w, cx| this.open_attachment(att.clone(), w, cx))),
             );
         }
-        // a picture whose line was deleted (or undone) is out of the mail
-        let body = self.body.read(cx).value();
-        let pictures: Vec<&Picture> = self.pictures.iter().filter(|p| body.contains(&p.text.marker())).collect();
-        for (i, p) in pictures.iter().enumerate() {
-            let tip = SharedString::from(format!(
-                "{} {}",
-                tr!("In the text as", "Im Text als"),
-                p.text.marker()
-            ));
-            attachments = attachments.child(
-                h_flex()
-                    .id(("picture", i))
-                    .gap_1p5()
-                    .p_0p5()
-                    .pr_2p5()
-                    .rounded(px(6.))
-                    .border_1()
-                    .border_color(theme.border)
-                    .text_xs()
-                    .items_center()
-                    .child(match &p.preview {
-                        Some(preview) => img(preview.clone()).h(px(40.)).max_w(px(160.)).rounded(px(4.)).into_any_element(),
-                        None => div().pl_2().child(Icon::new(IconName::Image).xsmall()).into_any_element(),
-                    })
-                    .child(p.text.name.clone())
-                    .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx)),
-            );
-        }
+
+        // the mail as it goes out: your text, the signature, then a reply's quote
+        let text = match &self.view {
+            Some(view) if !self.loading => view.element().into_any_element(),
+            Some(_) => h_flex()
+                .size_full()
+                .justify_center()
+                .items_center()
+                .child(Icon::new(IconName::LoaderCircle).text_color(theme.muted_foreground))
+                .into_any_element(),
+            None => div()
+                .p_5()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(tr!("The text needs WebKit, which could not start.", "Der Text braucht WebKit, das nicht starten konnte."))
+                .into_any_element(),
+        };
 
         v_flex()
             .key_context(actions::COMPOSER)
@@ -821,8 +981,8 @@ impl Render for Composer {
             })
             .when(!self.has_markers, |d| {
                 d.child(div().px_5().py_2().bg(theme.warning.opacity(0.12)).text_xs().text_color(theme.warning).child(tr!(
-                    "This draft was not written in Just Mail: editing the text saves it as plain text.",
-                    "Dieser Entwurf stammt nicht aus Just Mail: Änderungen am Text speichern ihn als einfachen Text."
+                    "This draft was not written in Just Mail: editing the text saves it anew, with Just Mail's signature and without Outlook's looks.",
+                    "Dieser Entwurf stammt nicht aus Just Mail: Änderungen am Text speichern ihn neu, mit der Signatur aus Just Mail und ohne Outlooks Gestaltung."
                 )))
             })
             .child(field_row(tr!("From", "Von"), h_flex().h_8().text_size(theme::TEXT).child(account), cx))
@@ -830,69 +990,18 @@ impl Render for Composer {
             .when(self.show_cc, |d| {
                 d.child(field_row("Cc", self.cc.clone(), cx)).child(field_row("Bcc", self.bcc.clone(), cx))
             })
-            .child(field_row(tr!("Subject", "Betreff"), field(&self.subject), cx))
-            .when(!self.attachments.is_empty() || !pictures.is_empty(), |d| d.child(attachments))
-            .child(
-                // the mail as it goes out: your text, the signature, then a reply's quote
-                div().id("compose-scroll").flex_1().min_h_0().overflow_y_scroll().child(
-                    v_flex()
-                        .px_3()
-                        .pt_2()
-                        .pb_6()
-                        .child(Textarea::new(&self.body).appearance(false).on_paste({
-                            let this = cx.entity().downgrade();
-                            move |item, window, cx| this.update(cx, |this, cx| this.paste(item, window, cx)).unwrap_or(false)
-                        }))
-                        .when_some(self.signature.as_ref(), |d, signature| {
-                            d.child(
-                                div()
-                                    .id("compose-signature")
-                                    .mx_2()
-                                    .mt_2()
-                                    .pt_3()
-                                    .border_t_1()
-                                    .border_color(theme.border.opacity(0.6))
-                                    .text_sm()
-                                    .child(signature.render())
-                                    .tooltip(|w, cx| {
-                                        gpui_kit::component::tooltip::Tooltip::new(tr!(
-                                            "Signature: change it under Accounts & signatures",
-                                            "Signatur: änderbar unter Konten & Signaturen"
-                                        ))
-                                        .build(w, cx)
-                                    }),
-                            )
-                        })
-                        .when_some(self.quote.clone(), |d, quote| {
-                            let toggle = Button::new("toggle-quote")
-                                .ghost()
-                                .xsmall()
-                                .icon(if self.show_quote { IconName::ChevronUp } else { IconName::Ellipsis })
-                                .label(if self.show_quote {
-                                    tr!("Hide quoted mail", "Zitierte E-Mail ausblenden")
-                                } else {
-                                    tr!("Show quoted mail", "Zitierte E-Mail anzeigen")
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.show_quote = !this.show_quote;
-                                    cx.notify();
-                                }));
-                            d.child(h_flex().mx_2().mt_4().child(toggle)).when(self.show_quote, |d| {
-                                d.child(
-                                    div()
-                                        .mx_2()
-                                        .mt_2()
-                                        .p_4()
-                                        .rounded(px(8.))
-                                        .bg(theme.muted)
-                                        .text_sm()
-                                        .text_color(theme.muted_foreground)
-                                        .child(TextView::markdown("compose-quote", quote)),
-                                )
-                            })
-                        }),
-                ),
-            )
+            .child(field_row(
+                tr!("Subject", "Betreff"),
+                // ⇥ goes on to the text, which GPUI's focus order doesn't know
+                div().capture_action(cx.listener(|this, _: &IndentInline, window, cx| {
+                    this.focus_text(window, cx);
+                    cx.stop_propagation();
+                }))
+                .child(field(&self.subject)),
+                cx,
+            ))
+            .when(!self.attachments.is_empty(), |d| d.child(attachments))
+            .child(div().flex_1().min_h_0().child(text))
     }
 }
 

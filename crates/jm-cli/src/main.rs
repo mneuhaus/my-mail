@@ -13,7 +13,7 @@ use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use jm_core::{Error, ErrorCode, FlagStatus, Result};
 use serde_json::{Value, json};
 
-use crate::ops::{Ctx, DraftParams, ListParams};
+use crate::ops::{BodyFormat, Ctx, DraftParams, ListParams};
 use crate::output::View;
 
 const MAIN_EXAMPLES: &str = "\
@@ -302,7 +302,7 @@ enum DraftsCommand {
     },
     /// Create a reply draft: your text and signature above the quoted mail
     #[command(
-        after_help = "Examples:\n  jm drafts reply a1b2c3d4 --body \"Danke, passt so.\"\n  jm drafts reply a1b2c3d4 --all --body-file antwort.txt --attach plan.pdf\n\nThe signature carries the closing greeting: don't end the body with one (unless --no-signature)."
+        after_help = "Examples:\n  jm drafts reply a1b2c3d4 --body \"Danke, passt so.\"\n  jm drafts reply a1b2c3d4 --all --body-file antwort.txt --attach plan.pdf\n  jm drafts reply a1b2c3d4 --markdown --body-file antwort.md      **bold**, lists, tables\n\nThe signature carries the closing greeting: don't end the body with one (unless --no-signature)."
     )]
     Reply {
         /// Message to answer
@@ -339,15 +339,14 @@ enum DraftsCommand {
         /// New subject
         #[arg(long)]
         subject: Option<String>,
-        /// New text (plain text unless --html)
+        /// New text (plain text unless --markdown or --html)
         #[arg(long, conflicts_with = "body_file")]
         body: Option<String>,
         /// Read the new text from a file (- = stdin)
         #[arg(long, value_name = "PATH")]
         body_file: Option<PathBuf>,
-        /// The body is HTML
-        #[arg(long)]
-        html: bool,
+        #[command(flatten)]
+        format: FormatArgs,
         /// Attach a file (repeatable)
         #[arg(long, value_name = "FILE")]
         attach: Vec<PathBuf>,
@@ -381,7 +380,7 @@ struct CopyArgs {
 #[derive(Args, Debug)]
 #[group(required = true, multiple = false, id = "body_source")]
 struct BodyArgs {
-    /// Your text (plain text unless --html)
+    /// Your text (plain text unless --markdown or --html)
     #[arg(long, group = "body_source")]
     body: Option<String>,
     /// Read your text from a file (- = stdin)
@@ -393,7 +392,7 @@ struct BodyArgs {
 
 #[derive(Args, Debug)]
 struct OptionalBodyArgs {
-    /// Your text (plain text unless --html)
+    /// Your text (plain text unless --markdown or --html)
     #[arg(long, conflicts_with = "body_file")]
     body: Option<String>,
     /// Read your text from a file (- = stdin)
@@ -405,15 +404,34 @@ struct OptionalBodyArgs {
 
 #[derive(Args, Debug)]
 struct BodyExtras {
-    /// The body is HTML (default: plain text)
-    #[arg(long)]
-    html: bool,
+    #[command(flatten)]
+    format: FormatArgs,
     /// Attach a file (repeatable)
     #[arg(long, value_name = "FILE")]
     attach: Vec<PathBuf>,
     /// Leave out the account signature
     #[arg(long)]
     no_signature: bool,
+}
+
+#[derive(Args, Debug)]
+struct FormatArgs {
+    /// The body is Markdown: **bold**, *italic*, lists and tables become formatted mail
+    #[arg(long, conflicts_with = "html")]
+    markdown: bool,
+    /// The body is HTML (default: plain text)
+    #[arg(long)]
+    html: bool,
+}
+
+impl FormatArgs {
+    fn format(&self) -> BodyFormat {
+        match (self.markdown, self.html) {
+            (true, _) => BodyFormat::Markdown,
+            (_, true) => BodyFormat::Html,
+            _ => BodyFormat::Text,
+        }
+    }
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
@@ -438,7 +456,7 @@ impl BodyExtras {
         DraftParams {
             body,
             body_file,
-            html: self.html,
+            format: self.format.format(),
             attachments: self.attach,
             signature: !self.no_signature,
             ..Default::default()
@@ -540,7 +558,7 @@ fn drafts(ctx: impl Fn() -> Result<Ctx>, action: DraftsCommand) -> Result<Outcom
             let params = DraftParams { to, ..body.extra.into_params(body.body, body.body_file) };
             (View::Draft, ops::forward_draft(&ctx()?, &id, &params)?)
         }
-        DraftsCommand::Update { id, to, copies, subject, body, body_file, html, attach, importance } => {
+        DraftsCommand::Update { id, to, copies, subject, body, body_file, format, attach, importance } => {
             let params = DraftParams {
                 to,
                 cc: copies.cc,
@@ -548,7 +566,7 @@ fn drafts(ctx: impl Fn() -> Result<Ctx>, action: DraftsCommand) -> Result<Outcom
                 subject,
                 body,
                 body_file,
-                html,
+                format: format.format(),
                 attachments: attach,
                 signature: true,
                 importance: importance.map(|i| i.as_str().to_string()),
@@ -687,6 +705,19 @@ mod tests {
         let both = ["jm", "drafts", "create", "--to", "a@b.c", "--subject", "x", "--body", "y", "--body-file", "z"];
         assert!(Cli::try_parse_from(both).is_err());
         parse(&["jm", "drafts", "create", "--to", "a@b.c", "--subject", "x", "--body", "y", "--no-signature"]);
+    }
+
+    #[test]
+    fn a_body_is_text_markdown_or_html() {
+        let format = |args: &[&str]| match parse(args).command {
+            Command::Drafts { action: Some(DraftsCommand::Reply { body, .. }) } => body.extra.format.format(),
+            Command::Drafts { action: Some(DraftsCommand::Update { format, .. }) } => format.format(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(format(&["jm", "drafts", "reply", "a1b2", "--body", "x"]), BodyFormat::Text);
+        assert_eq!(format(&["jm", "drafts", "reply", "a1b2", "--body", "x", "--markdown"]), BodyFormat::Markdown);
+        assert_eq!(format(&["jm", "drafts", "update", "a1b2", "--body", "x", "--html"]), BodyFormat::Html);
+        assert!(Cli::try_parse_from(["jm", "drafts", "reply", "a1b2", "--body", "x", "--markdown", "--html"]).is_err());
     }
 
     #[test]

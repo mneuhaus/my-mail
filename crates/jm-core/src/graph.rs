@@ -636,7 +636,7 @@ impl Mailbox {
         self.json("POST", &format!("/me/messages/{}/attachments", enc(draft_id)), PREFER_IDS, Some(&file_attachment(file)?))
     }
 
-    /// Attach a picture the author's text shows (`<img src="cid:…">`, see [`html::TextPicture`]).
+    /// Attach a picture the author's text shows (`<img src="cid:…">`, see [`html::picture_tag`]).
     pub fn add_inline_image(&self, draft_id: &str, image: &html::InlineImage) -> Result<Attachment> {
         self.guard_writable()?;
         if image.bytes.len() > MAX_ATTACHMENT_BYTES {

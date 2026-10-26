@@ -7,12 +7,16 @@
 //! until the reader allows images. The script passes link clicks, copying and the app's keyboard
 //! shortcuts on (`window.ipc`). Mail with its own background colors shows as designed, on light;
 //! plain mail takes the app's colors, in dark mode all of them.
+//!
+//! The draft editor uses the same web view for its own page (see `editor`): reader and editor
+//! never show at the same time.
 
 use std::cell::Cell;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 
 use futures::channel::mpsc;
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 use html_escape::{encode_double_quoted_attribute as attr, encode_text as text};
 use serde::Deserialize;
@@ -30,6 +34,8 @@ pub enum WebMessage {
     Key { key: String, cmd: bool, shift: bool },
     /// "Edit" on a draft below the mail.
     Edit(String),
+    /// From the draft editor's page.
+    Editor(crate::editor::EditorMessage),
 }
 
 /// One mail on the page.
@@ -60,15 +66,36 @@ pub struct Palette {
     pub selection: Hsla,
 }
 
+impl Palette {
+    /// The colors of the app's theme.
+    pub fn of(cx: &App) -> Self {
+        let theme = cx.theme();
+        Palette {
+            dark: theme.mode.is_dark(),
+            foreground: theme.foreground,
+            muted: theme.muted_foreground,
+            border: theme.border,
+            card: crate::theme::extra(cx).card,
+            hover: theme.secondary_hover,
+            link: theme.link,
+            selection: theme.selection,
+        }
+    }
+}
+
+/// A handle: clones are the same web view.
+#[derive(Clone)]
 pub struct MailView {
     web: Rc<wry::WebView>,
     /// Hash of what the page shows, so it only loads again when that changes.
-    shown: Option<u64>,
+    shown: Rc<Cell<Option<u64>>>,
     /// Where the web view was put last, in window coordinates.
     placed: Rc<Cell<Option<Bounds<Pixels>>>>,
     visible: Rc<Cell<bool>>,
     /// A menu of GPUI lies where the web view would be (see `cover`).
     covered: Rc<Cell<bool>>,
+    /// Take the keyboard as soon as it shows (hidden, it cannot).
+    focus_pending: Rc<Cell<bool>>,
 }
 
 impl MailView {
@@ -90,13 +117,21 @@ impl MailView {
                 }
             })
             .build_as_child(window)?;
-        let view = Self { web: Rc::new(web), shown: None, placed: Rc::default(), visible: Rc::default(), covered: Rc::default() };
+        let view = Self {
+            web: Rc::new(web),
+            shown: Rc::default(),
+            placed: Rc::default(),
+            visible: Rc::default(),
+            covered: Rc::default(),
+            focus_pending: Rc::default(),
+        };
         Ok((view, rx))
     }
 
     /// Hide the web view and give the keyboard back to the window (the editor that comes next
     /// would get no keys).
     pub fn hide(&self, cx: &App) {
+        self.focus_pending.set(false);
         if self.visible.replace(false) {
             let _ = self.web.set_visible(false);
             self.release_keyboard(cx);
@@ -117,6 +152,21 @@ impl MailView {
             .detach();
     }
 
+    /// Give the web view the keyboard (now, or when it shows next).
+    pub fn focus(&self, cx: &App) {
+        if !self.visible.get() {
+            self.focus_pending.set(true);
+            return;
+        }
+        // later, outside of the update: see `release_keyboard`
+        let web = self.web.clone();
+        cx.foreground_executor()
+            .spawn(async move {
+                let _ = web.focus();
+            })
+            .detach();
+    }
+
     /// GPUI cannot draw over the web view: while the returned guard lives, it stays hidden, if an
     /// overlay reaching from the left up to `right` (in the window) would lie under it.
     pub fn cover(&self, right: Pixels) -> Option<Cover> {
@@ -132,27 +182,43 @@ impl MailView {
 
     /// Show the mails `cards` builds, unless `key` (with `remote` and the palette) says the page
     /// shows them already.
-    pub fn show(&mut self, key: u64, cards: impl FnOnce() -> Vec<Card>, remote: bool, palette: &Palette) {
+    pub fn show(&self, key: u64, cards: impl FnOnce() -> Vec<Card>, remote: bool, palette: &Palette) {
         let mut hasher = DefaultHasher::new();
         (key, remote, palette.dark).hash(&mut hasher);
         let key = hasher.finish();
-        if self.shown != Some(key) {
-            self.shown = Some(key);
+        if self.shown.get() != Some(key) {
+            self.shown.set(Some(key));
             let _ = self.web.load_html(&page(&cards(), remote, palette));
         }
     }
 
     /// Load the page again with the next [`MailView::show`], even if it shows the same mails.
-    pub fn forget(&mut self) {
-        self.shown = None;
+    pub fn forget(&self) {
+        self.shown.set(None);
+    }
+
+    /// Load another page than the mails (the draft editor's).
+    pub fn load(&self, html: &str) {
+        self.shown.set(None);
+        let _ = self.web.load_html(html);
+    }
+
+    /// Run `js` in the page.
+    pub fn evaluate(&self, js: &str) {
+        let _ = self.web.evaluate_script(js);
     }
 
     /// Takes the space the web view should cover; it is put there when this is laid out.
     pub fn element(&self) -> impl IntoElement {
-        let (web, placed, visible, covered) =
-            (self.web.clone(), self.placed.clone(), self.visible.clone(), self.covered.clone());
+        let (web, placed, visible, covered, focus) = (
+            self.web.clone(),
+            self.placed.clone(),
+            self.visible.clone(),
+            self.covered.clone(),
+            self.focus_pending.clone(),
+        );
         canvas(
-            move |bounds, _, _| {
+            move |bounds, _, cx| {
                 if placed.get() != Some(bounds) {
                     placed.set(Some(bounds));
                     let rect = wry::Rect {
@@ -163,6 +229,13 @@ impl MailView {
                 }
                 if !covered.get() && !visible.replace(true) {
                     let _ = web.set_visible(true);
+                }
+                if visible.get() && focus.take() {
+                    cx.foreground_executor()
+                        .spawn(async move {
+                            let _ = web.focus();
+                        })
+                        .detach();
                 }
             },
             |_, _, _, _| {},
@@ -181,7 +254,7 @@ impl Drop for Cover {
 }
 
 /// A color for CSS.
-fn css(color: Hsla) -> String {
+pub(crate) fn css(color: Hsla) -> String {
     let c = color.to_rgb();
     let byte = |v: f32| (v * 255.).round() as u8;
     format!("rgba({},{},{},{:.3})", byte(c.r), byte(c.g), byte(c.b), c.a)
@@ -231,16 +304,19 @@ fn page(cards: &[Card], remote: bool, p: &Palette) -> String {
     // inside the script: no `<` that could end it
     let mails = serde_json::to_string(&mails).unwrap_or_default().replace('<', "\\u003c");
     let remote_src = if remote { " https: http:" } else { "" };
-    let nonce = {
-        use std::hash::BuildHasher as _;
-        format!("{:016x}", std::collections::hash_map::RandomState::new().hash_one(std::time::SystemTime::now()))
-    };
+    let nonce = nonce();
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
          <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'nonce-{nonce}'; \
          style-src 'unsafe-inline'{remote_src}; img-src data:{remote_src}; font-src data:{remote_src}; form-action 'none'; base-uri 'none'\">\
-         <style>{vars}{PAGE_CSS}</style></head><body>{body}<script nonce=\"{nonce}\">const MAILS = {mails};{PAGE_JS}</script></body></html>"
+         <style>{vars}{PAGE_CSS}</style></head><body>{body}<script nonce=\"{nonce}\">const MAILS = {mails};{MOUNT_JS}{PAGE_JS}</script></body></html>"
     )
+}
+
+/// A fresh value that lets only the page's own script run (content policy `script-src`).
+pub(crate) fn nonce() -> String {
+    use std::hash::BuildHasher as _;
+    format!("{:016x}", std::collections::hash_map::RandomState::new().hash_one(std::time::SystemTime::now()))
 }
 
 const PAGE_CSS: &str = "\
@@ -262,26 +338,24 @@ body{padding:0 24px 24px;font:14px/1.45 -apple-system,BlinkMacSystemFont,sans-se
 .designed .head{padding-bottom:12px}";
 
 /// In front of every mail's own styles. `.jm-body` stands for the mail's `<body>`.
-const MAIL_CSS: &str = ".jm-body{overflow-wrap:break-word;overflow-x:auto}::selection{background:var(--selection)}";
+pub(crate) const MAIL_CSS: &str = ".jm-body{overflow-wrap:break-word;overflow-x:auto}::selection{background:var(--selection)}";
 
 /// Mail with its own colors, on the white it was made for.
-const DESIGNED_CSS: &str = ".jm-body{background:#fff;color:#000;color-scheme:light}";
+pub(crate) const DESIGNED_CSS: &str = ".jm-body{background:#fff;color:#000;color-scheme:light}";
 
 /// Plain mail sits on the card like the app's own text; big pictures shrink to fit.
-const PLAIN_CSS: &str = "a{color:var(--link)}img{max-width:100%;height:auto}";
+pub(crate) const PLAIN_CSS: &str = "a{color:var(--link)}img{max-width:100%;height:auto}";
 
 /// Plain mail in dark mode: all of it in the app's colors.
-const PLAIN_DARK_CSS: &str = "\
+pub(crate) const PLAIN_DARK_CSS: &str = "\
 .jm-body *{color:inherit!important;background-color:transparent!important;border-color:var(--border)!important}\
 .jm-body a,.jm-body a *{color:var(--link)!important}";
 
-/// Puts each mail into the shadow root of its card: parsed apart (`DOMParser`, where nothing runs
-/// or loads), its styles and body taken over, `html` and `body` in its styles pointed at the box it
-/// is shown in. Passes link clicks, copying and keys on to the app: arrows, space and the like
-/// stay with the page for scrolling, ⌘C copies through the app, other keys are the app's shortcuts.
-const PAGE_JS: &str = r##"
-(() => {
-  const send = (m) => window.ipc.postMessage(JSON.stringify(m));
+/// `mount(host, mail)` puts a mail into the shadow root of `host`: parsed apart (`DOMParser`,
+/// where nothing runs or loads), its styles and body taken over, `html` and `body` in its styles
+/// pointed at the box it is shown in. `mail` is `{ html, css }`.
+pub(crate) const MOUNT_JS: &str = r##"
+const mount = (() => {
   const outer = /(^|[^\w.#-])(html|body)(?![\w-])/gi;
   function retarget(rules) {
     for (const rule of rules) {
@@ -309,6 +383,16 @@ const PAGE_JS: &str = r##"
     root.append(body);
     for (const style of root.querySelectorAll("style")) if (style.sheet) retarget(style.sheet.cssRules);
   }
+  return mount;
+})();
+"##;
+
+/// Puts each mail into the shadow root of its card (`MOUNT_JS`). Passes link clicks, copying and
+/// keys on to the app: arrows, space and the like stay with the page for scrolling, ⌘C copies
+/// through the app, other keys are the app's shortcuts.
+const PAGE_JS: &str = r##"
+(() => {
+  const send = (m) => window.ipc.postMessage(JSON.stringify(m));
   for (const host of document.querySelectorAll("[data-mail]")) mount(host, MAILS[+host.dataset.mail]);
 
   const own = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End", " ",

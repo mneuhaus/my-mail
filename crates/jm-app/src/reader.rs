@@ -208,17 +208,7 @@ impl MailApp {
                 {
                     (id, pictures).hash(&mut key);
                 }
-                let palette = Palette {
-                    dark: theme.mode.is_dark(),
-                    foreground: theme.foreground,
-                    muted: theme.muted_foreground,
-                    border: theme.border,
-                    card: theme::extra(cx).card,
-                    hover: theme.secondary_hover,
-                    link: theme.link,
-                    selection: theme.selection,
-                };
-                view.show(key.finish(), || cards(opened), opened.images_loaded, &palette);
+                view.show(key.finish(), || cards(opened), opened.images_loaded, &Palette::of(cx));
                 view.element().into_any_element()
             }
             None => div()
@@ -261,6 +251,11 @@ impl MailApp {
                 if let Pane::Reader(opened) = &self.pane {
                     let account = opened.account;
                     self.open_draft(account, id, window, cx);
+                }
+            }
+            WebMessage::Editor(message) => {
+                if let Pane::Composer(composer) = &self.pane {
+                    composer.update(cx, |c, cx| c.on_editor(message, window, cx));
                 }
             }
         }

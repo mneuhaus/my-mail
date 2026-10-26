@@ -21,93 +21,28 @@ const TEXT_PICTURE_W: u32 = 600;
 
 /// Plain text to mail HTML: escaped, line breaks as `<br>`.
 pub fn text_to_html(text: &str) -> String {
-    text_to_html_with(text, &[])
-}
-
-/// A picture in the author's text: `[name]` in the editor, its `<img>` in the mail.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TextPicture {
-    pub name: String,
-    pub tag: String,
-}
-
-impl TextPicture {
-    /// The picture attached as `content_id`, `size` pixels big (shown at most 600 wide).
-    pub fn new(name: &str, content_id: &str, (width, height): (u32, u32)) -> Self {
-        let (w, h) = if width > TEXT_PICTURE_W {
-            (TEXT_PICTURE_W, (u64::from(height) * u64::from(TEXT_PICTURE_W) / u64::from(width)).max(1) as u32)
-        } else {
-            (width, height)
-        };
-        let alt = html_escape::encode_double_quoted_attribute(name);
-        let tag = format!(
-            "<img src=\"cid:{content_id}\" alt=\"{alt}\" width=\"{w}\" height=\"{h}\" style=\"max-width:100%;height:auto\">"
-        );
-        TextPicture { name: name.to_string(), tag }
-    }
-
-    /// How the editor shows it.
-    pub fn marker(&self) -> String {
-        format!("[{}]", self.name)
-    }
-
-    pub fn content_id(&self) -> Option<String> {
-        content_ids(&self.tag).into_iter().next()
-    }
-}
-
-/// [`text_to_html`] with every `[name]` of one of `pictures` as that picture.
-pub fn text_to_html_with(text: &str, pictures: &[TextPicture]) -> String {
-    let markers: Vec<(String, &str)> =
-        pictures.iter().map(|p| (html_escape::encode_text(&p.marker()).into_owned(), p.tag.as_str())).collect();
     let text = text.replace("\r\n", "\n");
     text.trim_end_matches('\n')
         .split('\n')
         .map(|line| {
             // keep indentation visible
             let indent = line.len() - line.trim_start_matches(' ').len();
-            let mut line = html_escape::encode_text(&line[indent..]).into_owned();
-            for (marker, tag) in &markers {
-                line = line.replace(marker, tag);
-            }
-            format!("{}{line}", "&nbsp;".repeat(indent))
+            format!("{}{}", "&nbsp;".repeat(indent), html_escape::encode_text(&line[indent..]))
         })
         .collect::<Vec<_>>()
         .join("<br>\n")
 }
 
-/// [`html_to_text`] with each embedded picture (`<img src="cid:…">`) as `[name]`, its `alt` text
-/// or else its content id, and those pictures.
-pub fn html_to_text_with_pictures(html: &str) -> (String, Vec<TextPicture>) {
-    let lower = html.to_ascii_lowercase();
-    let mut marked = String::with_capacity(html.len());
-    let mut pictures: Vec<TextPicture> = Vec::new();
-    let mut copied = 0;
-    for (start, end) in img_tags(&lower) {
-        let Some((s, e)) = attr_value(&lower, start, end, "src") else { continue };
-        if !lower[s..e].trim().starts_with("cid:") {
-            continue;
-        }
-        let alt = attr_value(&lower, start, end, "alt").map(|(s, e)| html_escape::decode_html_entities(&html[s..e]).trim().to_string());
-        let stem = alt.filter(|a| !a.is_empty()).unwrap_or_else(|| {
-            let id = content_id(&html[s..e].trim()[4..]);
-            id.split('@').next().unwrap_or_default().to_string()
-        });
-        // a name in the text stands for one picture
-        let mut name = stem.clone();
-        let mut n = 1;
-        while pictures.iter().any(|p| p.name == name) {
-            n += 1;
-            name = format!("{stem} ({n})");
-        }
-        let tag_end = (end + 1).min(html.len());
-        marked.push_str(&html[copied..start]);
-        marked.push_str(&html_escape::encode_text(&format!("[{name}]")));
-        copied = tag_end;
-        pictures.push(TextPicture { name, tag: html[start..tag_end].to_string() });
-    }
-    marked.push_str(&html[copied..]);
-    (html_to_text(&marked), pictures)
+/// A picture in the author's text: attached as `content_id`, `size` pixels big, shown at most
+/// 600 wide, `name` its `alt` text.
+pub fn picture_tag(name: &str, content_id: &str, (width, height): (u32, u32)) -> String {
+    let (w, h) = if width > TEXT_PICTURE_W {
+        (TEXT_PICTURE_W, (u64::from(height) * u64::from(TEXT_PICTURE_W) / u64::from(width)).max(1) as u32)
+    } else {
+        (width, height)
+    };
+    let alt = html_escape::encode_double_quoted_attribute(name);
+    format!("<img src=\"cid:{content_id}\" alt=\"{alt}\" width=\"{w}\" height=\"{h}\" style=\"max-width:100%;height:auto\">")
 }
 
 /// A token that keeps the content ids of one draft's inline images apart from any other's
@@ -317,11 +252,13 @@ pub fn quote_html(document: &str) -> Option<&str> {
     (!html_to_text(rest).trim().is_empty()).then_some(rest)
 }
 
-/// HTML to editable plain text: the inverse of [`text_to_html`] for our own markup, a decent
-/// approximation for anything else.
+/// HTML to plain text: the inverse of [`text_to_html`] for our own markup, a decent
+/// approximation for anything else (table cells apart by ` | `, list items as `- `).
 pub fn html_to_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut rest = html;
+    // a cell of the current table row came already
+    let mut in_row = false;
     while let Some(lt) = rest.find('<') {
         push_collapsed(&mut out, &rest[..lt]);
         let Some(gt) = rest[lt..].find('>') else {
@@ -333,10 +270,22 @@ pub fn html_to_text(html: &str) -> String {
         let closing = tag.starts_with('/');
         match name.as_str() {
             "br" => out.push('\n'),
-            "p" | "div" | "li" | "tr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "blockquote"
+            "p" | "div" | "li" | "tr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "blockquote" | "table"
                 if closing && !out.ends_with('\n') =>
             {
                 out.push('\n')
+            }
+            "tr" if !closing => in_row = false,
+            "td" | "th" if !closing => {
+                if std::mem::replace(&mut in_row, true) {
+                    out.push_str(" | ");
+                }
+            }
+            "li" if !closing => {
+                if !(out.is_empty() || out.ends_with('\n')) {
+                    out.push('\n');
+                }
+                out.push_str("- ");
             }
             "style" | "script" | "head" | "title" if !closing => {
                 // skip to the matching closing tag
@@ -385,10 +334,56 @@ fn push_collapsed(out: &mut String, text: &str) {
     }
 }
 
+/// HTML for Just Mail's editor (pasted, or a draft written elsewhere): its structure (lines,
+/// emphasis, lists, tables, links) without the styles, classes and fonts of where it came from,
+/// which would look out of place in a mail or unreadable in dark mode. Tables get the borders of
+/// [`crate::markdown`] tables. A `<p>` becomes a line followed by an empty one, since Outlook
+/// collapses it; Word's and Outlook's `<p class=MsoNormal>` stands for one line, so there it
+/// becomes just that. With `pictures`, embedded pictures (`cid:`) stay.
+pub fn clean_for_editing(html: &str, pictures: bool) -> String {
+    let mut builder = ammonia::Builder::empty();
+    builder
+        .add_tags([
+            "a", "b", "strong", "i", "em", "u", "s", "strike", "sub", "sup", "code", "pre", "br", "hr", "div", "p",
+            "blockquote", "ul", "ol", "li", "h1", "h2", "h3", "h4", "table", "thead", "tbody", "tfoot", "tr", "th", "td",
+        ])
+        .add_tag_attributes("a", ["href"])
+        .add_tag_attributes("ol", ["start"])
+        .add_tag_attributes("td", ["colspan", "rowspan"])
+        .add_tag_attributes("th", ["colspan", "rowspan"])
+        .set_tag_attribute_value("table", "cellpadding", "0")
+        .set_tag_attribute_value("table", "cellspacing", "0")
+        .set_tag_attribute_value("table", "style", "border-collapse:collapse")
+        .set_tag_attribute_value("td", "style", crate::markdown::CELL)
+        .set_tag_attribute_value("th", "style", crate::markdown::HEAD_CELL)
+        .clean_content_tags(["script", "style", "title", "xml"].into())
+        .url_schemes(["http", "https", "mailto", "tel"].into())
+        .link_rel(None);
+    if pictures {
+        builder.add_tags(["img"]).add_tag_attributes("img", ["src", "alt", "width", "height"]).add_url_schemes(["cid"]);
+    }
+    let word = html.contains("MsoNormal");
+    let clean = builder.clean(html).to_string();
+    let clean = clean.replace("<p>", "<div>");
+    let clean = if word { clean.replace("</p>", "</div>") } else { clean.replace("</p>", "</div><div><br></div>") };
+    let mut clean = clean.trim().to_string();
+    while let Some(rest) = clean.strip_suffix("<div><br></div>") {
+        clean = rest.trim_end().to_string();
+    }
+    clean
+}
+
 /// Readable plain text of a whole mail, links as footnotes (for the CLI and MCP). What the mail's
 /// CSS hides (a newsletter's preview text) stays out.
 pub fn to_readable_text(html: &str, width: usize) -> String {
     html2text::config::plain().use_doc_css().string_from_read(html.as_bytes(), width).unwrap_or_else(|_| html_to_text(html))
+}
+
+/// The picture as a `data:` URL, typed by its bytes where they tell.
+pub fn data_url(image: &InlineImage) -> String {
+    use base64::Engine as _;
+    let mime = image_type(&image.bytes).unwrap_or(image.content_type.as_str());
+    format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&image.bytes))
 }
 
 /// Clean mail HTML for display: no scripts, styles or event handlers, nothing the mail hides,
@@ -523,7 +518,6 @@ pub fn to_display_markdown(html: &str, remote_images: bool, images: &[InlineImag
 /// own goes (scripts, frames, plugins, a refresh, a base URL). The web view adds the rest: a
 /// sandbox without scripts and a content policy that keeps remote content out unless allowed.
 pub fn to_web_document(html: &str, images: &[InlineImage]) -> String {
-    use base64::Engine as _;
     let html = strip_active(html);
     let lower = html.to_ascii_lowercase();
     let mut out = String::with_capacity(html.len());
@@ -532,9 +526,8 @@ pub fn to_web_document(html: &str, images: &[InlineImage]) -> String {
         let Some((s, e)) = attr_value(&lower, start, end, "src") else { continue };
         let Some(id) = lower[s..e].trim().strip_prefix("cid:").map(|_| content_id(&html[s..e].trim()[4..])) else { continue };
         let Some(image) = images.iter().find(|i| i.content_id.eq_ignore_ascii_case(&id)) else { continue };
-        let mime = image_type(&image.bytes).unwrap_or(image.content_type.as_str());
         out.push_str(&html[copied..s]);
-        out.push_str(&format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&image.bytes)));
+        out.push_str(&data_url(image));
         copied = e;
     }
     out.push_str(&html[copied..]);
@@ -874,25 +867,15 @@ mod tests {
     }
 
     #[test]
-    fn pictures_roundtrip_through_the_text() {
-        let picture = TextPicture::new("Bild 1.png", "picture.png@jm-1", (1200, 801));
-        assert_eq!(picture.content_id().as_deref(), Some("picture.png@jm-1"));
-        assert!(picture.tag.contains("width=\"600\" height=\"400\""));
-        let text = "Hallo,\n\nhier:\n[Bild 1.png]\n\n[Bild 2.png] ist keins";
-        let html = text_to_html_with(text, std::slice::from_ref(&picture));
-        assert!(html.contains("hier:<br>\n<img src=\"cid:picture.png@jm-1\" alt=\"Bild 1.png\""));
-        assert!(html.contains("[Bild 2.png] ist keins"));
-        let (back, pictures) = html_to_text_with_pictures(&html);
-        assert_eq!(back, text);
-        assert_eq!(pictures, vec![picture]);
+    fn pictures_in_the_text_show_at_most_600_wide() {
+        let tag = picture_tag("Bild \"1\".png", "picture.png@jm-1", (1200, 801));
+        assert_eq!(
+            tag,
+            "<img src=\"cid:picture.png@jm-1\" alt=\"Bild &quot;1&quot;.png\" width=\"600\" height=\"400\" style=\"max-width:100%;height:auto\">"
+        );
+        assert_eq!(content_ids(&tag), ["picture.png@jm-1"]);
         assert!(is_own_content_id("picture.png@jm-1"));
-
-        // without alt text the content id names it; a name stands for one picture only
-        let (text, pictures) =
-            html_to_text_with_pictures("a<br><img src=\"cid:shot.png@x\"><br><IMG ALT=\"shot.png\" SRC=\"cid:b@x\"><img src=\"logo.png\">");
-        assert_eq!(text, "a\n[shot.png]\n[shot.png (2)]");
-        assert_eq!(pictures[1].tag, "<IMG ALT=\"shot.png\" SRC=\"cid:b@x\">");
-        assert_eq!(text_to_html_with(&text, &pictures), "a<br>\n<img src=\"cid:shot.png@x\"><br>\n<IMG ALT=\"shot.png\" SRC=\"cid:b@x\">");
+        assert!(picture_tag("a", "b@c", (40, 20)).contains("width=\"40\" height=\"20\""));
     }
 
     #[test]
@@ -1092,5 +1075,27 @@ mod tests {
         let md = to_display_markdown(html, false, &[]);
         assert!(md.contains("**Telefon**\u{2003}+1 555 0100\\\n**Web**\u{2003}[x.example](https://x.example)"), "{md}");
         assert!(md.contains("**Anna Muster**\\\nProjektmanager"), "{md}");
+    }
+
+    #[test]
+    fn tables_and_lists_stay_readable_as_text() {
+        let html = "<div>Ablauf:</div><table><tr><th>Uhrzeit</th><th>Schritt</th></tr>\
+                    <tr><td>15:54</td><td>Bestellung</td></tr></table><ul><li>a</li><li>b</li></ul>";
+        assert_eq!(html_to_text(html), "Ablauf:\nUhrzeit | Schritt\n15:54 | Bestellung\n- a\n- b");
+    }
+
+    #[test]
+    fn pasted_html_keeps_its_structure_not_its_looks() {
+        let web = "<p style=\"color:#eee\" class=\"x\">Hallo <span style=\"font:9px x\"><b>du</b></span></p><p>zwei</p>\
+                   <script>alert(1)</script><style>p{}</style><img src=\"https://t.example/p.gif\"><a href=\"javascript:x\">j</a>";
+        assert_eq!(clean_for_editing(web, false), "<div>Hallo <b>du</b></div><div><br></div><div>zwei</div><div><br></div><a>j</a>");
+        let outlook = "<p class=\"MsoNormal\">eins<o:p></o:p></p><p class=\"MsoNormal\">zwei</p><img src=\"cid:a@b\" alt=\"a\">";
+        assert_eq!(clean_for_editing(outlook, true), "<div>eins</div><div>zwei</div><img src=\"cid:a@b\" alt=\"a\">");
+        let table = clean_for_editing("<table class=\"t\"><tr><td width=\"9\">x</td></tr></table>", false);
+        // the attributes it sets come in any order
+        for part in ["<table ", "cellpadding=\"0\"", "cellspacing=\"0\"", "style=\"border-collapse:collapse\"", "<td style=\"border:1px"] {
+            assert!(table.contains(part), "{table}");
+        }
+        assert!(!table.contains("class") && !table.contains("width"), "{table}");
     }
 }

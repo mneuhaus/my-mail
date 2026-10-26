@@ -8,6 +8,7 @@ mod actions;
 mod app;
 mod composer;
 mod dock;
+mod editor;
 mod i18n;
 mod list;
 mod mailview;
@@ -29,7 +30,8 @@ gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
         Mail, MailOpen, Send, Archive, Trash, Pin, PinOff, Reply, ReplyAll, Forward, Paperclip, SquarePen, Pencil, Lock,
-        Image, Download, FolderInput, CircleCheckBig, Save, ListTodo, LogIn, KeyRound
+        Image, Download, FolderInput, CircleCheckBig, Save, ListTodo, LogIn, KeyRound, Bold, Italic, Underline, List,
+        ListOrdered
     ]
 );
 

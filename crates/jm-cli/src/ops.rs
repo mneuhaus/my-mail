@@ -84,6 +84,18 @@ pub struct ListParams {
     pub next: Option<String>,
 }
 
+/// How a draft body is written.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum BodyFormat {
+    /// Lines and paragraphs, nothing else.
+    #[default]
+    Text,
+    /// Bold, lists, tables and links, as mail HTML (see `jm_core::markdown`).
+    Markdown,
+    /// Mail HTML already.
+    Html,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct DraftParams {
     /// Recipient lists; each entry may itself be a comma-separated list.
@@ -94,8 +106,8 @@ pub struct DraftParams {
     pub body: Option<String>,
     /// `-` reads stdin.
     pub body_file: Option<PathBuf>,
-    /// The body is HTML already (default: plain text).
-    pub html: bool,
+    /// What the body is written in.
+    pub format: BodyFormat,
     pub attachments: Vec<PathBuf>,
     /// Append the account signature (new drafts, replies, forwards).
     pub signature: bool,
@@ -151,8 +163,8 @@ pub fn parse_recipients(values: &[String]) -> Result<Option<Vec<Recipient>>> {
     Recipient::parse_list(&values.join(", ")).map(Some)
 }
 
-/// The author's HTML from `body` or `body_file` (`-` = stdin). Plain text unless `as_html`.
-pub fn body_html(body: Option<&str>, body_file: Option<&Path>, as_html: bool) -> Result<Option<String>> {
+/// The author's HTML from `body` or `body_file` (`-` = stdin), written in `format`.
+pub fn body_html(body: Option<&str>, body_file: Option<&Path>, format: BodyFormat) -> Result<Option<String>> {
     let text = match (body, body_file) {
         (Some(_), Some(_)) => return Err(Error::validation("use either a body or a body file, not both")),
         (Some(body), None) => body.to_string(),
@@ -165,7 +177,11 @@ pub fn body_html(body: Option<&str>, body_file: Option<&Path>, as_html: bool) ->
             .map_err(|e| Error::not_found(format!("cannot read body file {}: {e}", path.display())))?,
         (None, None) => return Ok(None),
     };
-    Ok(Some(if as_html { text } else { html::text_to_html(&text) }))
+    Ok(Some(match format {
+        BodyFormat::Text => html::text_to_html(&text),
+        BodyFormat::Markdown => jm_core::markdown::to_mail_html(&text),
+        BodyFormat::Html => text,
+    }))
 }
 
 /// Read every file before anything is created, so a bad path changes nothing.
@@ -656,7 +672,7 @@ pub fn create_draft(ctx: &Ctx, p: &DraftParams) -> Result<Value> {
         .ok_or_else(|| Error::validation("a new draft needs at least one recipient (to)"))?;
     let subject = p.subject.clone().filter(|s| !s.trim().is_empty());
     let subject = subject.ok_or_else(|| Error::validation("a new draft needs a subject"))?;
-    let body = body_html(p.body.as_deref(), p.body_file.as_deref(), p.html)?
+    let body = body_html(p.body.as_deref(), p.body_file.as_deref(), p.format)?
         .ok_or_else(|| Error::validation("a new draft needs a body").hint("pass --body TEXT or --body-file PATH"))?;
     let input = DraftInput {
         to: Some(to),
@@ -673,7 +689,7 @@ pub fn create_draft(ctx: &Ctx, p: &DraftParams) -> Result<Value> {
 }
 
 pub fn reply_draft(ctx: &Ctx, id: &str, all: bool, p: &DraftParams) -> Result<Value> {
-    let body = body_html(p.body.as_deref(), p.body_file.as_deref(), p.html)?
+    let body = body_html(p.body.as_deref(), p.body_file.as_deref(), p.format)?
         .ok_or_else(|| Error::validation("a reply needs a body").hint("pass --body TEXT or --body-file PATH"))?;
     let files = load_files(&p.attachments)?;
     let (mb, id) = ctx.target(id)?;
@@ -687,7 +703,7 @@ pub fn forward_draft(ctx: &Ctx, id: &str, p: &DraftParams) -> Result<Value> {
     let to = parse_recipients(&p.to)?
         .filter(|to| !to.is_empty())
         .ok_or_else(|| Error::validation("a forward needs at least one recipient (to)"))?;
-    let body = body_html(p.body.as_deref(), p.body_file.as_deref(), p.html)?.unwrap_or_default();
+    let body = body_html(p.body.as_deref(), p.body_file.as_deref(), p.format)?.unwrap_or_default();
     let files = load_files(&p.attachments)?;
     let (mb, id) = ctx.target(id)?;
     let draft = mb.create_forward(&id, &to, &body, p.signature)?;
@@ -703,7 +719,7 @@ pub fn update_draft(ctx: &Ctx, id: &str, p: &DraftParams) -> Result<Value> {
         cc: parse_recipients(&p.cc)?,
         bcc: parse_recipients(&p.bcc)?,
         subject: p.subject.clone(),
-        body_html: body_html(p.body.as_deref(), p.body_file.as_deref(), p.html)?,
+        body_html: body_html(p.body.as_deref(), p.body_file.as_deref(), p.format)?,
         importance: check_importance(p.importance.as_deref())?,
     };
     let files = load_files(&p.attachments)?;
@@ -865,19 +881,21 @@ mod tests {
 
     #[test]
     fn plain_text_bodies_become_html_and_html_stays() {
-        let text = body_html(Some("Hallo <Martin>,\n\nGrüße"), None, false).unwrap().unwrap();
+        let text = body_html(Some("Hallo <Martin>,\n\nGrüße"), None, BodyFormat::Text).unwrap().unwrap();
         assert_eq!(text, "Hallo &lt;Martin&gt;,<br>\n<br>\nGrüße");
-        let raw = body_html(Some("<b>fett</b>"), None, true).unwrap().unwrap();
+        let raw = body_html(Some("<b>fett</b>"), None, BodyFormat::Html).unwrap().unwrap();
         assert_eq!(raw, "<b>fett</b>");
-        assert_eq!(body_html(None, None, false).unwrap(), None);
-        assert!(body_html(Some("a"), Some(Path::new("b")), false).is_err());
-        let missing = body_html(None, Some(Path::new("/nonexistent/jm-body.txt")), false).unwrap_err();
+        let md = body_html(Some("Hallo,\n\n**fett**"), None, BodyFormat::Markdown).unwrap().unwrap();
+        assert_eq!(md, "<div>Hallo,</div>\n<div><br></div>\n<div><b>fett</b></div>");
+        assert_eq!(body_html(None, None, BodyFormat::Text).unwrap(), None);
+        assert!(body_html(Some("a"), Some(Path::new("b")), BodyFormat::Text).is_err());
+        let missing = body_html(None, Some(Path::new("/nonexistent/jm-body.txt")), BodyFormat::Text).unwrap_err();
         assert_eq!(missing.code, jm_core::ErrorCode::NotFound);
     }
 
     #[test]
     fn body_and_signature_assemble_into_marked_blocks() {
-        let body = body_html(Some("Hi\nthere"), None, false).unwrap().unwrap();
+        let body = body_html(Some("Hi\nthere"), None, BodyFormat::Text).unwrap().unwrap();
         let doc = html::new_document(&body, &html::text_to_html("Marc Neuhaus\nRoothirsch GmbH"));
         assert_eq!(html::author_html(&doc).map(html::html_to_text).as_deref(), Some("Hi\nthere"));
         assert!(html::has_signature(&doc));

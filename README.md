@@ -20,12 +20,14 @@ an MCP server) that share the same accounts. Mail goes through Microsoft Graph o
   In the trash, *Move to inbox* (right-click, or the reader's toolbar) takes a mail back.
 - **Drafts live on the server.** New mail, replies (in the conversation, above the quote) and
   forwards are Graph drafts; the editor saves while you type. Files attached to a draft open with a
-  click, also when an agent attached them. A picture pasted with ⌘V (a screenshot, say) goes out as
-  an inline image where the cursor was: in the text field a line `[Picture 1.png]` stands for it,
-  and deleting that line takes it out again. Copied files become attachments. Your signature is
-  added once and kept out of the text field, so editing never mangles it or the quote. Two HTML
-  signatures per account (taken from Spark): the long one for new mails, the short one for replies
-  and forwards; logos go along as inline images.
+  click, also when an agent attached them. Your signature is added once and kept out of the text,
+  so editing never mangles it or the quote. Two HTML signatures per account (taken from Spark): the
+  long one for new mails, the short one for replies and forwards; logos go along as inline images.
+- **Rich text**: the editor is WebKit, so what a draft carries stays as it is, whoever wrote it:
+  bold, lists, tables, links, pictures. `⌘B`, `⌘I`, `⌘U`, `⇧⌘8` bullets and `⇧⌘7` numbers (or
+  the toolbar), `⌘Z`/`⇧⌘Z`. A picture pasted with `⌘V` (a screenshot, say) goes out as an inline
+  image where the cursor was; copied files become attachments; text copied from a web page or
+  Word keeps its structure but not its fonts and colors.
 - **Recipients are chips**: ⌫ takes out a whole recipient, a click shows its address. Typing
   suggests people from your mail, those you write to first (the recipients of the last 1000 sent
   mails, the senders of the last 500 in the inbox); `↑/↓` pick, `↩`, `⇥` or a comma take one. A
@@ -42,11 +44,16 @@ jm list [--unread] [--flagged] [-f folder] [--since 2d]
 jm search "Rechnung" [--since 2w]
 jm show a1b2c3d4                       # 8-character short ids from listings
 jm drafts reply a1b2c3d4 --body "Passt so, danke!"
+jm drafts reply a1b2c3d4 --markdown --body-file antwort.md   # **bold**, lists, tables
 jm drafts create --to max@example.com --subject "Angebot" --body-file mail.txt
 jm flag a1b2c3d4 | jm archive a1b2c3d4
 jm open a1b2c3d4                       # show it in the app
 jm mcp                                 # MCP server on stdio
 ```
+
+Draft text is plain text by default; `--markdown` takes Markdown (`**bold**`, lists, tables,
+links) and turns it into mail HTML that Outlook shows as it should (tables with borders and a
+header row), `--html` takes HTML as it is. The MCP tools have `markdown` and `html` for the same.
 
 `--json` prints exactly one JSON object. `-a <id|address>` picks the account (default: the first).
 Exit codes: 0 ok, 1 general/Graph, 2 auth, 3 validation, 4 not found, 5 network.

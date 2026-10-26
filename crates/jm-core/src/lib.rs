@@ -13,6 +13,7 @@ pub mod error;
 pub mod events;
 pub mod graph;
 pub mod html;
+pub mod markdown;
 pub mod ids;
 pub mod model;
 pub mod paths;

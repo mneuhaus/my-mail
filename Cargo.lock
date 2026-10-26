@@ -3817,6 +3817,7 @@ dependencies = [
  "htmd",
  "html-escape",
  "html2text",
+ "markdown",
  "serde",
  "serde_json",
  "sha2 0.10.9",

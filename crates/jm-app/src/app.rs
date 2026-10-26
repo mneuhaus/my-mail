@@ -839,7 +839,7 @@ impl MailApp {
     /// Show a draft in the editor.
     pub fn open_draft(&mut self, account: usize, id: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(acc) = self.accounts.get(account) else { return };
-        let composer = cx.new(|cx| Composer::existing(account, acc.mailbox.clone(), id, window, cx));
+        let composer = cx.new(|cx| Composer::existing(account, acc.mailbox.clone(), self.mail_view.clone(), id, window, cx));
         self.set_composer(composer, window, cx);
     }
 
@@ -1055,7 +1055,7 @@ impl MailApp {
             self.writable(account, window, cx);
             return;
         }
-        let composer = cx.new(|cx| Composer::blank(account, acc.mailbox.clone(), window, cx));
+        let composer = cx.new(|cx| Composer::blank(account, acc.mailbox.clone(), self.mail_view.clone(), window, cx));
         self.selected = None;
         self.set_composer(composer, window, cx);
     }
@@ -1082,7 +1082,7 @@ impl MailApp {
             move |this, result, window, cx| match result {
                 Ok(draft) => {
                     let mailbox = this.accounts[account].mailbox.clone();
-                    let composer = cx.new(|cx| Composer::loaded(account, mailbox, draft, window, cx));
+                    let composer = cx.new(|cx| Composer::loaded(account, mailbox, this.mail_view.clone(), draft, window, cx));
                     this.selected = None;
                     this.set_composer(composer, window, cx);
                 }
@@ -1173,8 +1173,8 @@ impl Render for MailApp {
         let theme = cx.theme().clone();
         let sidebar = self.render_sidebar(window, cx);
         let list = self.render_list(window, cx);
-        // the web view lies on top of the window, so it has to go with the reader
-        if let Some(view) = self.mail_view.as_ref().filter(|_| !matches!(self.pane, Pane::Reader(_))) {
+        // the web view lies on top of the window, so it has to go with the reader and the editor
+        if let Some(view) = self.mail_view.as_ref().filter(|_| !matches!(self.pane, Pane::Reader(_) | Pane::Composer(_))) {
             view.hide(cx);
         }
         let pane: AnyElement = match &self.pane {

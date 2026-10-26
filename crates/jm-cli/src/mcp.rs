@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use jm_core::{Config, Error, FlagStatus, Result};
 use serde_json::{Map, Value, json};
 
-use crate::ops::{self, Ctx, DraftParams, ListParams};
+use crate::ops::{self, BodyFormat, Ctx, DraftParams, ListParams};
 
 const PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
 const LATEST_PROTOCOL: &str = "2025-06-18";
@@ -242,7 +242,12 @@ impl<'a> Args<'a> {
             subject: self.opt_str("subject")?,
             body: self.get("body").and_then(Value::as_str).map(str::to_string),
             body_file: None,
-            html: self.flag("html")?,
+            format: match (self.flag("markdown")?, self.flag("html")?) {
+                (true, true) => return Err(Error::validation("markdown and html exclude each other")),
+                (true, false) => BodyFormat::Markdown,
+                (false, true) => BodyFormat::Html,
+                (false, false) => BodyFormat::Text,
+            },
             attachments: self.list("attachments")?.into_iter().map(PathBuf::from).collect(),
             signature: self.opt_bool("signature")?.unwrap_or(true),
             importance: self.opt_str("importance")?,
@@ -275,8 +280,9 @@ pub fn tools() -> Vec<Value> {
         "description": "Addresses: a list of strings or one comma-separated string; 'Name <a@b.c>' works",
         "anyOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }]
     });
-    let body = json!({ "type": "string", "description": "The text you write (plain text unless html is true). Signature and quoted mail are added below it. The signature already carries the closing ('Herzliche Grüße aus Gütersloh / Marc Neuhaus'), so with the signature on, do NOT end the body with a greeting or name." });
-    let html = json!({ "type": "boolean", "description": "body is HTML (default: plain text)" });
+    let body = json!({ "type": "string", "description": "The text you write: plain text, or Markdown with markdown=true for bold, lists and tables. Signature and quoted mail are added below it. The signature already carries the closing ('Herzliche Grüße aus Gütersloh / Marc Neuhaus'), so with the signature on, do NOT end the body with a greeting or name." });
+    let markdown = json!({ "type": "boolean", "description": "body is Markdown (GitHub flavour): **bold**, *italic*, lists, tables and links become formatted mail. Use it whenever the text needs any of these." });
+    let html = json!({ "type": "boolean", "description": "body is mail HTML (default: plain text); prefer markdown" });
     let signature = json!({ "type": "boolean", "description": "Append the account signature (default true)" });
     let files = json!({ "type": "array", "items": { "type": "string" }, "description": "Local file paths to attach (max 3 MB each)" });
     let importance = json!({ "type": "string", "enum": ["low", "normal", "high"] });
@@ -371,7 +377,7 @@ pub fn tools() -> Vec<Value> {
             ),
             json!({
                 "to": addresses, "cc": addresses, "bcc": addresses,
-                "subject": { "type": "string" }, "body": body, "html": html,
+                "subject": { "type": "string" }, "body": body, "markdown": markdown, "html": html,
                 "signature": signature, "attachments": files, "importance": importance
             }),
             &["to", "subject", "body"],
@@ -384,7 +390,7 @@ pub fn tools() -> Vec<Value> {
             ),
             json!({
                 "id": id, "all": { "type": "boolean", "description": "Reply to all" },
-                "body": body, "html": html, "signature": signature, "attachments": files
+                "body": body, "markdown": markdown, "html": html, "signature": signature, "attachments": files
             }),
             &["id", "body"],
             false,
@@ -393,7 +399,7 @@ pub fn tools() -> Vec<Value> {
             "forward_draft",
             &format!("Create a forward draft of a message (keeps its attachments). {NOT_SENT}"),
             json!({
-                "id": id, "to": addresses, "body": body, "html": html,
+                "id": id, "to": addresses, "body": body, "markdown": markdown, "html": html,
                 "signature": signature, "attachments": files
             }),
             &["id", "to"],
@@ -406,7 +412,7 @@ pub fn tools() -> Vec<Value> {
             ),
             json!({
                 "id": id, "to": addresses, "cc": addresses, "bcc": addresses,
-                "subject": { "type": "string" }, "body": body, "html": html,
+                "subject": { "type": "string" }, "body": body, "markdown": markdown, "html": html,
                 "importance": importance, "attachments": files
             }),
             &["id"],

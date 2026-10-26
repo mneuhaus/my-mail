@@ -24,4 +24,5 @@ ammonia = "4"
 html2text = { version = "0.14", features = ["css"] }
 htmd = "0.5"
 html-escape = "0.2"
+markdown = "1"
 url = "2"
