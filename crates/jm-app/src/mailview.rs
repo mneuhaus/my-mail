@@ -14,6 +14,7 @@
 use std::cell::Cell;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::channel::mpsc;
 use gpui_kit::component::ActiveTheme as _;
@@ -117,6 +118,7 @@ impl MailView {
                 }
             })
             .build_as_child(window)?;
+        keys_stay_in_the_page();
         let view = Self {
             web: Rc::new(web),
             shown: Rc::default(),
@@ -188,6 +190,7 @@ impl MailView {
         let key = hasher.finish();
         if self.shown.get() != Some(key) {
             self.shown.set(Some(key));
+            EDITOR.store(false, Ordering::Relaxed);
             let _ = self.web.load_html(&page(&cards(), remote, palette));
         }
     }
@@ -200,6 +203,7 @@ impl MailView {
     /// Load another page than the mails (the draft editor's).
     pub fn load(&self, html: &str) {
         self.shown.set(None);
+        EDITOR.store(true, Ordering::Relaxed);
         let _ = self.web.load_html(html);
     }
 
@@ -252,6 +256,87 @@ impl Drop for Cover {
         self.0.set(false);
     }
 }
+
+/// Whether the page is the draft editor's (see `keys_stay_in_the_page`).
+static EDITOR: AtomicBool = AtomicBool::new(false);
+
+/// While the editor has the keyboard, keys without ⌘ are its text's. AppKit offers arrows (and other
+/// function keys) to GPUI's view first, as key equivalents, and GPUI hands them to its own text
+/// input; macOS then typed them into the draft as control characters (0x1C–0x1F for the arrows).
+/// Shortcuts with ⌘ still go to GPUI first. The reader keeps GPUI's way: ↑/↓ go through the list
+/// even after a click into the mail.
+#[cfg(target_os = "macos")]
+fn keys_stay_in_the_page() {
+    use std::sync::OnceLock;
+
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
+    use objc2::{msg_send, sel};
+
+    type KeyEquivalent = unsafe extern "C-unwind" fn(&AnyObject, Sel, &AnyObject) -> Bool;
+    type KeyDown = unsafe extern "C-unwind" fn(&AnyObject, Sel, &AnyObject);
+    static GPUI_KEY_EQUIVALENT: OnceLock<Imp> = OnceLock::new();
+    static GPUI_KEY_DOWN: OnceLock<Imp> = OnceLock::new();
+
+    /// `view` is GPUI's; is `event` for the editor's page instead?
+    unsafe fn for_the_page(view: &AnyObject, event: &AnyObject) -> bool {
+        const COMMAND: usize = 1 << 20; // NSEventModifierFlagCommand
+        if !EDITOR.load(Ordering::Relaxed) {
+            return false;
+        }
+        let Some(web_view) = AnyClass::get(c"WKWebView") else { return false };
+        // SAFETY: AppKit objects on the main thread, where AppKit sends key events
+        unsafe {
+            let flags: usize = msg_send![event, modifierFlags];
+            let window: Option<Retained<AnyObject>> = msg_send![view, window];
+            let responder: Option<Retained<AnyObject>> = window.and_then(|w| msg_send![&w, firstResponder]);
+            flags & COMMAND == 0
+                && responder.is_some_and(|r| {
+                    let is: Bool = msg_send![&r, isKindOfClass: web_view];
+                    is.as_bool()
+                })
+        }
+    }
+    unsafe extern "C-unwind" fn key_equivalent(view: &AnyObject, sel: Sel, event: &AnyObject) -> Bool {
+        // SAFETY: GPUI's implementation, with the signature it was made for
+        unsafe {
+            if for_the_page(view, event) {
+                return Bool::NO; // AppKit goes on to the web view's `keyDown:`
+            }
+            std::mem::transmute::<Imp, KeyEquivalent>(GPUI_KEY_EQUIVALENT.get().copied().unwrap())(view, sel, event)
+        }
+    }
+    // keys the page did not use come back to its superview, GPUI's view
+    unsafe extern "C-unwind" fn key_down(view: &AnyObject, sel: Sel, event: &AnyObject) {
+        // SAFETY: as above
+        unsafe {
+            if !for_the_page(view, event) {
+                std::mem::transmute::<Imp, KeyDown>(GPUI_KEY_DOWN.get().copied().unwrap())(view, sel, event);
+            }
+        }
+    }
+
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let Some(class) = AnyClass::get(c"GPUIView") else { return };
+        let ours: [(Sel, Imp, &OnceLock<Imp>); 2] = [
+            // SAFETY: function pointers of the same size; called back with their own signature
+            (sel!(performKeyEquivalent:), unsafe { std::mem::transmute::<KeyEquivalent, Imp>(key_equivalent) }, &GPUI_KEY_EQUIVALENT),
+            (sel!(keyDown:), unsafe { std::mem::transmute::<KeyDown, Imp>(key_down) }, &GPUI_KEY_DOWN),
+        ];
+        let methods = class.instance_methods();
+        for (sel, imp, gpui) in ours {
+            // GPUI's own methods only: replacing one inherited from NSView would change every view
+            if let Some(method) = methods.iter().find(|m| m.name() == sel) {
+                // SAFETY: same signature as GPUI's, which stays callable through `gpui`
+                let _ = gpui.set(unsafe { method.set_implementation(imp) });
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn keys_stay_in_the_page() {}
 
 /// A color for CSS.
 pub(crate) fn css(color: Hsla) -> String {

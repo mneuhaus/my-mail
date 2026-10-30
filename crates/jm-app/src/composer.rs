@@ -259,8 +259,11 @@ impl Composer {
         let author = html::author_html(&document).map(str::to_string);
         let markers = author.is_some();
         // written elsewhere: its body, without the looks Outlook or Word gave it
-        self.body_html = author.unwrap_or_else(|| html::clean_for_editing(&document, true));
-        self.saved_html = self.body_html.clone();
+        let text = author.unwrap_or_else(|| html::clean_for_editing(&document, true));
+        // arrow keys once typed control characters into the text: a Just Mail draft saves again
+        // without them
+        self.body_html = html::without_control_characters(&text);
+        self.saved_html = if markers { text } else { self.body_html.clone() };
         if !html::content_ids(&self.body_html).is_empty() {
             let mailbox = self.mailbox.clone();
             let (id, body) = (message.id.clone(), self.body_html.clone());
@@ -293,6 +296,9 @@ impl Composer {
             });
         }
         self.draft = Some(message);
+        if self.body_html != self.saved_html {
+            self.changed(window, cx);
+        }
         self.load_page(cx);
         cx.notify();
     }

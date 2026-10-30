@@ -373,6 +373,36 @@ pub fn clean_for_editing(html: &str, pictures: bool) -> String {
     clean
 }
 
+/// `html` without control characters (but tab and line breaks), typed or as character
+/// references: no mail text has them. Arrow keys once typed them into Just Mail's drafts
+/// (0x1C–0x1F).
+pub fn without_control_characters(html: &str) -> String {
+    let control = |c: u32| c < 0x20 && !matches!(c, 0x09 | 0x0A | 0x0D);
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(c) = rest.chars().next() {
+        if rest.starts_with("&#") {
+            // `&#31;` or `&#x1F;`
+            if let Some(end) = rest.bytes().take(10).position(|b| b == b';') {
+                let number = &rest[2..end];
+                let value = match number.strip_prefix(['x', 'X']) {
+                    Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                    None => number.parse().ok(),
+                };
+                if value.is_some_and(control) {
+                    rest = &rest[end + 1..];
+                    continue;
+                }
+            }
+        }
+        if !control(c as u32) {
+            out.push(c);
+        }
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
 /// Readable plain text of a whole mail, links as footnotes (for the CLI and MCP). What the mail's
 /// CSS hides (a newsletter's preview text) stays out.
 pub fn to_readable_text(html: &str, width: usize) -> String {
@@ -1082,6 +1112,16 @@ mod tests {
         let html = "<div>Ablauf:</div><table><tr><th>Uhrzeit</th><th>Schritt</th></tr>\
                     <tr><td>15:54</td><td>Bestellung</td></tr></table><ul><li>a</li><li>b</li></ul>";
         assert_eq!(html_to_text(html), "Ablauf:\nUhrzeit | Schritt\n15:54 | Bestellung\n- a\n- b");
+    }
+
+    #[test]
+    fn control_characters_leave_the_text() {
+        // as Graph keeps them, and as the editor's page hands them over
+        assert_eq!(without_control_characters("Warteschl&#31;an&#28;ge, pa&#x1E;sst"), "Warteschlange, passt");
+        assert_eq!(without_control_characters("pa\u{1e}sst\u{1b}"), "passt");
+        // what a mail does have stays
+        let kept = "a\tb\r\n<br>&#10;&#38;&amp;&#8364; &#; &# 31; Größe";
+        assert_eq!(without_control_characters(kept), kept);
     }
 
     #[test]
