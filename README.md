@@ -19,15 +19,24 @@ an MCP server) that share the same accounts. Mail goes through Microsoft Graph o
   accounts. Right-click a mail for reply, pin, read/unread, archive, delete or discard (drafts).
   In the trash, *Move to inbox* (right-click, or the reader's toolbar) takes a mail back.
 - **Drafts live on the server.** New mail, replies (in the conversation, above the quote) and
-  forwards are Graph drafts; the editor saves while you type. Files attached to a draft open with a
-  click, also when an agent attached them. Your signature is added once and kept out of the text,
+  forwards are Graph drafts; the editor saves while you type, and what you typed last when you
+  open another mail or quit. Files attached to a draft open with a click, also when an agent
+  attached them. Your signature is added once and kept out of the text,
   so editing never mangles it or the quote. Two HTML signatures per account (taken from Spark): the
   long one for new mails, the short one for replies and forwards; logos go along as inline images.
 - **Rich text**: the editor is WebKit, so what a draft carries stays as it is, whoever wrote it:
-  bold, lists, tables, links, pictures. `⌘B`, `⌘I`, `⌘U`, `⇧⌘8` bullets and `⇧⌘7` numbers (or
-  the toolbar), `⌘Z`/`⇧⌘Z`. A picture pasted with `⌘V` (a screenshot, say) goes out as an inline
-  image where the cursor was; copied files become attachments; text copied from a web page or
-  Word keeps its structure but not its fonts and colors.
+  bold, lists, tables, links, pictures. A format bar above the text has text size, bold, italic,
+  underlined, struck through, text color and marker, lists, quote, link, picture, table and
+  "remove formatting"; its buttons show what holds where the cursor is. `⌘B`, `⌘I`, `⌘U`, `⇧⌘X`,
+  `⌘K` links what is selected (a typed or pasted web address becomes a link by itself, `⌘` and a
+  click open one), `⇧⌘8` bullets and `⇧⌘7` numbers (or `- ` and `1. ` at the start of a line),
+  `⇥`/`⇧⇥` move list items in and out and walk the cells of a table, `⌘Z`/`⇧⌘Z`.
+- **Pictures** go into the text where the cursor is and out as inline images: paste one with
+  `⌘V` (a screenshot, say), drop files on the text, or pick them with the picture button. A click
+  on a picture shows a corner to drag its size with. An iPhone photo (HEIC) becomes a JPEG, and a
+  photo taken sideways is turned upright. Other files dropped or pasted become attachments; text
+  copied from a web page or Word keeps its structure but not its fonts and colors (`⇧⌘V` pastes
+  text only).
 - **Recipients are chips**: ⌫ takes out a whole recipient, a click shows its address. Typing
   suggests people from your mail, those you write to first (the recipients of the last 1000 sent
   mails, the senders of the last 500 in the inbox); `↑/↓` pick, `↩`, `⇥` or a comma take one. A
@@ -89,6 +98,11 @@ Crates: `jm-core` (accounts, sign-in, Graph, draft HTML), `jm-cli` (`jm`), `jm-a
 Try the app without an account: `tools/demo/run.sh` starts it on a made-up mailbox (a small local
 stand-in for Graph, `tools/demo/server.mjs`); `tools/demo/screenshots.sh` makes the pictures for the
 page in `docs/` (GitHub Pages).
+
+`cargo test` runs the unit tests. The draft editor's text is a web page (`crates/jm-app/src/editor/`);
+`tools/editor-test/run.sh` runs it in WebKit without the app's window and checks what it does with
+real keys and clicks (formats, lists, links, tables, pictures, undo). It needs Node and pnpm, and
+fetches Playwright's WebKit on its first run.
 
 This repo is public. After cloning, turn on the checks that keep secrets and local files out of
 commits and pushes (they use [gitleaks](https://github.com/gitleaks/gitleaks), `brew install gitleaks`):

@@ -55,9 +55,19 @@ const COLORS: &[(&str, &str, &str)] = &[
     ("title_bar_border", "#e0e0e5", "#2f3034"),
 ];
 
+/// The color called `name` in [`COLORS`], as `#rrggbb` or `#rrggbbaa`.
+fn color(name: &str, dark: bool) -> Option<&'static str> {
+    COLORS.iter().find(|(k, _, _)| *k == name).map(|(_, l, d)| if dark { *d } else { *l })
+}
+
+/// The color called `name` without a running app (black if there is none of that name).
+pub fn color_of(name: &str, dark: bool) -> Hsla {
+    color(name, dark).and_then(|hex| Rgba::try_from(hex).ok()).unwrap_or_default().into()
+}
+
 fn apply(config: &Rc<ThemeConfig>, dark: bool) -> Rc<ThemeConfig> {
     let mut c = (**config).clone();
-    let value = |name: &str| COLORS.iter().find(|(k, _, _)| *k == name).map(|(_, l, d)| if dark { *d } else { *l });
+    let value = |name: &str| color(name, dark);
     macro_rules! set {
         ($($field:ident),*) => { $( if let Some(v) = value(stringify!($field)) { c.colors.$field = Some(v.to_string().into()); } )* };
     }
@@ -109,7 +119,10 @@ pub struct Extra {
 }
 
 pub fn extra(cx: &App) -> Extra {
-    let dark = cx.theme().mode.is_dark();
+    extra_of(cx.theme().mode.is_dark())
+}
+
+pub fn extra_of(dark: bool) -> Extra {
     if dark {
         Extra {
             inbox: hex(0x4f8ff7),

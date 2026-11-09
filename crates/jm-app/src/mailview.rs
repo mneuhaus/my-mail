@@ -13,6 +13,7 @@
 
 use std::cell::Cell;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -23,7 +24,8 @@ use html_escape::{encode_double_quoted_attribute as attr, encode_text as text};
 use serde::Deserialize;
 use wry::dpi::{LogicalPosition, LogicalSize};
 
-/// What the page asks of the app.
+/// What the page asks of the app, and what happens to the web view itself (never read from a
+/// page's message: a page cannot claim that files were dropped on it).
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum WebMessage {
@@ -37,6 +39,12 @@ pub enum WebMessage {
     Edit(String),
     /// From the draft editor's page.
     Editor(crate::editor::EditorMessage),
+    /// Files are dragged over the draft editor's page, or left it again.
+    #[serde(skip)]
+    Dragging(bool),
+    /// Files were dropped on the draft editor's page, at this point of it.
+    #[serde(skip)]
+    Dropped { paths: Vec<PathBuf>, at: (i32, i32) },
 }
 
 /// One mail on the page.
@@ -61,8 +69,16 @@ pub struct Palette {
     pub foreground: Hsla,
     pub muted: Hsla,
     pub border: Hsla,
+    /// What the page lies on (the page itself is transparent).
+    pub background: Hsla,
     pub card: Hsla,
+    pub popover: Hsla,
+    /// A button under the pointer, and one held down.
     pub hover: Hsla,
+    pub active: Hsla,
+    /// The one blue for what matters.
+    pub accent: Hsla,
+    pub danger: Hsla,
     pub link: Hsla,
     pub selection: Hsla,
 }
@@ -76,10 +92,35 @@ impl Palette {
             foreground: theme.foreground,
             muted: theme.muted_foreground,
             border: theme.border,
+            background: theme.background,
             card: crate::theme::extra(cx).card,
+            popover: theme.popover,
             hover: theme.secondary_hover,
+            active: theme.secondary_active,
+            accent: theme.primary,
+            danger: theme.danger,
             link: theme.link,
             selection: theme.selection,
+        }
+    }
+
+    /// The same colors without a running app (see `editor::sample_page`).
+    pub fn sample(dark: bool) -> Self {
+        let color = |name| crate::theme::color_of(name, dark);
+        Palette {
+            dark,
+            foreground: color("foreground"),
+            muted: color("muted_foreground"),
+            border: color("border"),
+            background: color("background"),
+            card: crate::theme::extra_of(dark).card,
+            popover: color("popover"),
+            hover: color("secondary_hover"),
+            active: color("secondary_active"),
+            accent: color("primary"),
+            danger: color("danger"),
+            link: color("link"),
+            selection: color("selection"),
         }
     }
 }
@@ -103,6 +144,7 @@ impl MailView {
     /// The web view, hidden until a mail is shown. What the page asks comes out of the receiver.
     pub fn new(window: &Window) -> wry::Result<(Self, mpsc::UnboundedReceiver<WebMessage>)> {
         let (tx, rx) = mpsc::unbounded();
+        let placed: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::default();
         let web = wry::WebViewBuilder::new()
             .with_transparent(true)
             .with_visible(false)
@@ -112,9 +154,41 @@ impl MailView {
             .with_devtools(cfg!(debug_assertions))
             // the page and its mails, nothing else: links go through `WebMessage::Open`
             .with_navigation_handler(|url| url == "about:blank")
-            .with_ipc_handler(move |request| {
-                if let Ok(message) = serde_json::from_str(request.body()) {
-                    let _ = tx.unbounded_send(message);
+            .with_ipc_handler({
+                let tx = tx.clone();
+                move |request| {
+                    if let Ok(message) = serde_json::from_str(request.body()) {
+                        let _ = tx.unbounded_send(message);
+                    }
+                }
+            })
+            // files dragged onto the draft's text are the app's (WebKit would try to open them);
+            // any other drag, text moved within the text, stays WebKit's
+            .with_drag_drop_handler({
+                let (placed, files) = (placed.clone(), Cell::new(false));
+                move |event| {
+                    let ours = files.get();
+                    match event {
+                        wry::DragDropEvent::Enter { paths, .. } => {
+                            files.set(EDITOR.load(Ordering::Relaxed) && !paths.is_empty());
+                            if files.get() {
+                                let _ = tx.unbounded_send(WebMessage::Dragging(true));
+                            }
+                            return files.get();
+                        }
+                        wry::DragDropEvent::Drop { paths, position: (x, y) } if ours => {
+                            files.set(false);
+                            // wry counts from the window's left edge
+                            let left = placed.get().map_or(0., |p| f32::from(p.origin.x));
+                            let _ = tx.unbounded_send(WebMessage::Dropped { paths, at: (x - left as i32, y) });
+                        }
+                        wry::DragDropEvent::Leave if ours => {
+                            files.set(false);
+                            let _ = tx.unbounded_send(WebMessage::Dragging(false));
+                        }
+                        _ => {}
+                    }
+                    ours
                 }
             })
             .build_as_child(window)?;
@@ -122,7 +196,7 @@ impl MailView {
         let view = Self {
             web: Rc::new(web),
             shown: Rc::default(),
-            placed: Rc::default(),
+            placed,
             visible: Rc::default(),
             covered: Rc::default(),
             focus_pending: Rc::default(),

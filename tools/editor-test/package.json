@@ -1,0 +1,9 @@
+{
+  "name": "just-mail-editor-test",
+  "private": true,
+  "type": "module",
+  "description": "Runs the draft editor's page in WebKit, see run.sh",
+  "devDependencies": {
+    "playwright-core": "1.65.0"
+  }
+}

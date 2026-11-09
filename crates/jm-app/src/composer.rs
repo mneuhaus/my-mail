@@ -4,10 +4,16 @@
 //! The text is rich text in WebKit (see `editor`): it holds only the author's part, as HTML, so
 //! bold, lists, tables and pictures stay as they are, whoever wrote them (an agent through `jm`
 //! too). The signature and a reply's quote stay in the draft's HTML untouched (see
-//! `jm_core::html`). A pasted picture goes in where the cursor is and out as an inline image of
-//! the draft.
+//! `jm_core::html`). A picture (pasted, dropped on the text or picked from disk) goes in where
+//! the cursor is and out as an inline image of the draft; other files are attached.
+//!
+//! Whatever changes the draft on the server goes one after the other, a save, then the uploads
+//! (`saving`, `attaching`, and `DRAFT_WRITES` across composers): Graph refuses changes to one
+//! message that overlap. A composer that goes away, because another mail was opened or the app
+//! quits, still saves what was typed since the last save (`save_last_edits`).
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::Duration;
 
 use gpui_kit::assets::IconName;
@@ -30,6 +36,54 @@ use crate::{picture, theme, tr, util};
 const AUTOSAVE: Duration = Duration::from_secs(2);
 /// How long Send waits for the page to report the last keystrokes before it goes on anyway.
 const FLUSH_WAIT: Duration = Duration::from_millis(800);
+/// How long quitting waits for the last words to be saved.
+const QUIT_WAIT: Duration = Duration::from_secs(5);
+
+/// One change to a draft at a time, also across composers: a draft opened again must not be read
+/// before the composer that just left it has saved its last words.
+static DRAFT_WRITES: Mutex<()> = Mutex::new(());
+
+/// Wait for the turn to read or change a draft (off the UI thread).
+fn turn() -> MutexGuard<'static, ()> {
+    DRAFT_WRITES.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Save `input` to the draft `known` (a new one if there is none yet), when it is its turn.
+fn write_draft(mailbox: &Mailbox, known: &Mutex<Option<String>>, input: &DraftInput) -> jm_core::Result<Message> {
+    let _turn = turn();
+    // not held while the request is on its way: the UI thread sets it too
+    let id = known.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    let message = match id {
+        Some(id) => mailbox.update_draft(&id, input)?,
+        None => mailbox.create_draft(input, true, &[])?,
+    };
+    *known.lock().unwrap_or_else(PoisonError::into_inner) = Some(message.id.clone());
+    Ok(message)
+}
+
+/// On its way into the draft: it waits for the draft to exist.
+enum Upload {
+    /// A picture of the text.
+    Picture(InlineImage),
+    File(NewAttachment),
+}
+
+impl Upload {
+    /// Into the draft `id`. Tells its name, the content id of a picture, and the attachment a
+    /// file became.
+    fn send(self, mailbox: &Mailbox, id: &str) -> (String, Option<String>, jm_core::Result<Option<Attachment>>) {
+        match self {
+            Upload::Picture(image) => {
+                let added = mailbox.add_inline_image(id, &image).map(|_| None);
+                (image.name, Some(image.content_id), added)
+            }
+            Upload::File(file) => {
+                let added = mailbox.add_attachment(id, &file).map(Some);
+                (file.name, None, added)
+            }
+        }
+    }
+}
 
 pub enum ComposerEvent {
     Saved { account: usize, message: Box<Message> },
@@ -44,6 +98,11 @@ pub struct Composer {
     mailbox: Arc<Mailbox>,
     /// The draft as last saved; `None` until a new mail is first saved.
     draft: Option<Message>,
+    /// Its id as the server has it, for work off the UI thread: a save on its way may have just
+    /// made the draft.
+    known: Arc<Mutex<Option<String>>>,
+    /// Sent or deleted: nothing of it is to be saved anymore.
+    gone: bool,
     loading: bool,
     to: Entity<RecipientField>,
     cc: Entity<RecipientField>,
@@ -66,12 +125,14 @@ pub struct Composer {
     saved_html: String,
     /// The pictures of the text as `data:` URLs, by content id (lowercase).
     pictures: Vec<(String, String)>,
-    /// Names given to pasted pictures (`Bild 1.png`, …).
+    /// Names given to pasted pictures (`Bild 1`, …), without the extension.
     picture_names: Vec<String>,
-    /// Pasted pictures waiting for the draft to exist.
-    waiting: Vec<InlineImage>,
-    /// Pictures and files on their way into the draft.
+    /// Pictures and files waiting for the draft to exist, or for their turn.
+    waiting: Vec<Upload>,
+    /// Pictures and files on their way into the draft: being read, waiting or going up.
     uploading: usize,
+    /// Uploads are going up right now.
+    attaching: bool,
     /// Draft written by Just Mail (the text is the author's part only).
     has_markers: bool,
     /// The signature as it goes out, shown below the text (long for new mails, short for answers).
@@ -125,6 +186,14 @@ impl Composer {
                 this.focus_text(window, cx);
             }
         }));
+        // going away must not cost the last words: quitting waits for them
+        subscriptions.push(cx.on_release(|this, cx| drop(this.save_last_edits(cx))));
+        subscriptions.push(cx.on_app_quit(|this, cx| {
+            if let Some(saved) = this.save_last_edits(cx) {
+                let _ = saved.recv_timeout(QUIT_WAIT);
+            }
+            async {}
+        }));
         // shown by the reader until now: the text field gets it once its page is there, and the
         // keyboard goes to the fields meanwhile
         if let Some(view) = &view {
@@ -134,6 +203,8 @@ impl Composer {
             account,
             mailbox,
             draft: None,
+            known: Arc::default(),
+            gone: false,
             loading: false,
             to,
             cc,
@@ -152,6 +223,7 @@ impl Composer {
             picture_names: Vec::new(),
             waiting: Vec::new(),
             uploading: 0,
+            attaching: false,
             has_markers: true,
             signature: None,
             quote: None,
@@ -200,7 +272,11 @@ impl Composer {
     ) -> Self {
         let mut this = Self::base(account, mailbox.clone(), view, window, cx);
         this.loading = true;
-        this.run(window, cx, move || mailbox.message(&id), |this, result, window, cx| {
+        let fetch = move || {
+            let _turn = turn();
+            mailbox.message(&id)
+        };
+        this.run(window, cx, fetch, |this, result, window, cx| {
             this.loading = false;
             match result {
                 Ok(message) => this.fill(message, window, cx),
@@ -233,7 +309,7 @@ impl Composer {
     /// and nothing on its way to the server.
     pub fn reloadable(&self) -> Option<(String, String)> {
         let settled = !self.dirty && !self.loading && !self.saving && !self.sending && self.uploading == 0;
-        let draft = self.draft.as_ref().filter(|_| settled && self.waiting.is_empty())?;
+        let draft = self.draft.as_ref().filter(|_| settled)?;
         Some((self.mailbox.account.id.clone(), draft.id.clone()))
     }
 
@@ -295,10 +371,12 @@ impl Composer {
                 }
             });
         }
+        *self.known.lock().unwrap_or_else(PoisonError::into_inner) = Some(message.id.clone());
         self.draft = Some(message);
         if self.body_html != self.saved_html {
             self.changed(window, cx);
         }
+        self.upload_waiting(window, cx);
         self.load_page(cx);
         cx.notify();
     }
@@ -351,7 +429,15 @@ impl Composer {
             }
             // the keyboard is in the text: ⌘↩ and ⌘S are the composer's, ⌘V no field's
             EditorEvent::Focused => self.focus.focus(window, cx),
-            EditorEvent::Paste => self.paste(window, cx),
+            EditorEvent::Paste { plain } => self.paste(plain, window, cx),
+            EditorEvent::Picture => self.pick_pictures(window, cx),
+            EditorEvent::Leave => {
+                // the web view would keep the keys
+                if let Some(view) = &self.view {
+                    view.release_keyboard(cx);
+                }
+                self.subject.update(cx, |s, cx| s.focus(window, cx));
+            }
             EditorEvent::Flushed => {
                 if std::mem::take(&mut self.send_after_flush) {
                     self.send_checked(window, cx);
@@ -366,14 +452,6 @@ impl Composer {
             self.focus.focus(window, cx);
             view.focus(cx);
             view.evaluate(&editor::call("focus", ()));
-        }
-    }
-
-    /// A toolbar button: `command` on the selection in the text, which keeps the keyboard.
-    fn format(&mut self, command: &str, cx: &mut Context<Self>) {
-        if let Some(view) = &self.view {
-            view.focus(cx);
-            view.evaluate(&editor::call("command", command));
         }
     }
 
@@ -410,13 +488,57 @@ impl Composer {
         Ok(out)
     }
 
+    /// The draft as it is to be saved; `None` for a new mail with nothing worth a draft yet.
+    /// With `strict` an invalid address is an error instead of skipped.
+    fn draft_input(&self, cx: &App, strict: bool) -> Result<Option<DraftInput>, String> {
+        let [to, cc, bcc] = self.recipients(cx, strict)?;
+        let subject = Self::value(&self.subject, cx);
+        let is_new = self.draft.is_none();
+        let no_text = html::html_to_text(&self.body_html).trim().is_empty() && html::content_ids(&self.body_html).is_empty();
+        if is_new && no_text && subject.is_empty() && to.as_ref().is_none_or(|t| t.is_empty()) && self.waiting.is_empty() {
+            return Ok(None);
+        }
+        let body_html = (is_new || self.body_html != self.saved_html).then(|| self.body_html.clone());
+        Ok(Some(DraftInput { to, cc, bcc, subject: Some(subject), body_html, importance: None }))
+    }
+
+    /// The composer goes away (another mail was opened, the app quits): what was typed since
+    /// the last save, and what still waits to go into the draft, goes there on a thread of its
+    /// own. The receiver hears when that is done; `None` if there is nothing to save.
+    fn save_last_edits(&mut self, cx: &App) -> Option<mpsc::Receiver<()>> {
+        if self.gone || self.loading || (!self.dirty && self.waiting.is_empty()) {
+            return None;
+        }
+        let input = self.draft_input(cx, false).ok().flatten()?;
+        self.dirty = false;
+        let uploads = std::mem::take(&mut self.waiting);
+        let (mailbox, known) = (self.mailbox.clone(), self.known.clone());
+        let (done, heard) = mpsc::channel();
+        std::thread::spawn(move || {
+            if let Ok(draft) = write_draft(&mailbox, &known, &input) {
+                let _turn = turn();
+                for upload in uploads {
+                    let _ = upload.send(&mailbox, &draft.id);
+                }
+                // the list shows what the draft says now
+                jm_core::events::emit(&jm_core::events::Event::Changed {
+                    account: mailbox.id().to_string(),
+                    folder: Some("drafts".into()),
+                });
+            }
+            let _ = done.send(());
+        });
+        Some(heard)
+    }
+
     /// Save to the server; with `explicit` an invalid address is an error instead of skipped.
     fn save(&mut self, explicit: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.saving || self.loading {
-            return;
+        if self.saving || self.attaching || self.loading {
+            return; // its turn comes (see `settle`)
         }
-        let [to, cc, bcc] = match self.recipients(cx, explicit) {
-            Ok(r) => r,
+        let input = match self.draft_input(cx, explicit) {
+            Ok(Some(input)) => input,
+            Ok(None) => return, // nothing worth a draft yet
             Err(e) => {
                 self.error = Some(e);
                 self.send_after_save = false;
@@ -425,33 +547,15 @@ impl Composer {
             }
         };
         let body_html = self.body_html.clone();
-        let subject = Self::value(&self.subject, cx);
-        let is_new = self.draft.is_none();
-        let no_text = html::html_to_text(&body_html).trim().is_empty() && html::content_ids(&body_html).is_empty();
-        if is_new && no_text && subject.is_empty() && to.as_ref().is_none_or(|t| t.is_empty()) {
-            return; // nothing worth a draft yet
-        }
-        let input = DraftInput {
-            to,
-            cc,
-            bcc,
-            subject: Some(subject),
-            body_html: (is_new || body_html != self.saved_html).then(|| body_html.clone()),
-            importance: None,
-        };
         self.saving = true;
         self.error = None;
         let edits = self.edits;
-        let mailbox = self.mailbox.clone();
-        let id = self.draft.as_ref().map(|d| d.id.clone());
+        let (mailbox, known) = (self.mailbox.clone(), self.known.clone());
         cx.notify();
         self.run(
             window,
             cx,
-            move || match id {
-                Some(id) => mailbox.update_draft(&id, &input),
-                None => mailbox.create_draft(&input, true, &[]),
-            },
+            move || write_draft(&mailbox, &known, &input),
             move |this, result, window, cx| {
                 this.saving = false;
                 match result {
@@ -467,13 +571,7 @@ impl Composer {
                             account: this.mailbox.id().to_string(),
                             folder: Some("drafts".into()),
                         });
-                        this.upload_waiting(window, cx);
-                        if this.send_after_save && this.uploading == 0 {
-                            this.send_after_save = false;
-                            this.send_now(window, cx);
-                        } else if this.dirty {
-                            this.save(false, window, cx);
-                        }
+                        this.settle(window, cx);
                     }
                     Err(e) => {
                         this.send_after_save = false;
@@ -530,12 +628,29 @@ impl Composer {
         let unsaved = self.dirty || self.draft.is_none();
         if unsaved || self.saving || self.uploading > 0 {
             self.send_after_save = true;
-            if unsaved && !self.saving {
+            if unsaved {
                 self.save(true, window, cx);
             }
         } else {
             self.send_now(window, cx);
         }
+    }
+
+    /// A save or the uploads ended: what waited for its turn goes on. First what is to go into
+    /// the draft, then a save of what was typed meanwhile, then a send that waited for both.
+    fn settle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.saving || self.attaching {
+            return;
+        }
+        if !self.waiting.is_empty() {
+            self.upload_waiting(window, cx);
+        } else if self.dirty {
+            self.save(false, window, cx);
+        } else if self.send_after_save && self.uploading == 0 {
+            self.send_after_save = false;
+            self.send_checked(window, cx);
+        }
+        cx.notify();
     }
 
     fn send_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -554,6 +669,7 @@ impl Composer {
             this.sending = false;
             match result {
                 Ok(()) => {
+                    this.gone = true;
                     jm_core::events::emit(&jm_core::events::Event::Changed {
                         account: this.mailbox.id().to_string(),
                         folder: Some("sentitems".into()),
@@ -586,7 +702,10 @@ impl Composer {
                         let mailbox = c.mailbox.clone();
                         c.sending = true; // blocks autosave
                         c.run(window, cx, move || mailbox.delete_draft(&work_id), move |c, result, _, cx| match result {
-                            Ok(()) => cx.emit(ComposerEvent::Discarded { account: c.account, id: Some(id) }),
+                            Ok(()) => {
+                                c.gone = true;
+                                cx.emit(ComposerEvent::Discarded { account: c.account, id: Some(id) });
+                            }
                             Err(e) => {
                                 c.sending = false;
                                 c.error = Some(e.to_string());
@@ -599,52 +718,81 @@ impl Composer {
     }
 
     fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pick_files(window, cx, Self::add_files);
+    }
+
+    /// The picture button of the text: pictures go into the text (anything else is attached).
+    fn pick_pictures(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pick_files(window, cx, Self::add_dropped);
+    }
+
+    /// Ask for files and hand them to `then`.
+    fn pick_files(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: fn(&mut Self, Vec<PathBuf>, &mut Window, &mut Context<Self>),
+    ) {
         let picked = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: None });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = picked.await else { return };
-            let _ = this.update_in(cx, |this, window, cx| this.add_files(paths, window, cx));
+            let _ = this.update_in(cx, |this, window, cx| then(this, paths, window, cx));
         })
         .detach();
     }
 
-    fn add_files(&mut self, paths: Vec<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(draft) = &self.draft else {
-            self.error = Some(tr!(
-                "Write something first, then attach (the draft has to exist).",
-                "Erst etwas schreiben, dann anhängen (der Entwurf muss existieren)."
-            ).into());
-            self.save(false, window, cx);
-            cx.notify();
-            return;
-        };
-        let mailbox = self.mailbox.clone();
-        let id = draft.id.clone();
-        self.uploading += 1;
+    /// Attach files: read first (off the UI thread), then they go up once the draft exists.
+    fn add_files(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let count = paths.len();
+        self.uploading += count;
         cx.notify();
-        self.run(
-            window,
-            cx,
-            move || {
-                let mut added = Vec::new();
-                for path in paths {
-                    let file = NewAttachment::from_path(&path)?;
-                    added.push(mailbox.add_attachment(&id, &file)?);
-                }
-                Ok(added)
-            },
-            |this, result, window, cx| {
-                match result {
-                    Ok(added) => this.attachments.extend(added),
-                    Err(e) => this.upload_failed(e.to_string()),
-                }
-                this.uploaded(window, cx);
-            },
-        );
+        let read = move || paths.iter().map(|path| NewAttachment::from_path(path)).collect::<jm_core::Result<Vec<_>>>();
+        self.run(window, cx, read, move |this, result, window, cx| match result {
+            Ok(files) => {
+                this.waiting.extend(files.into_iter().map(Upload::File));
+                this.upload_waiting(window, cx);
+            }
+            Err(e) => {
+                this.upload_failed(e.to_string());
+                this.uploading = this.uploading.saturating_sub(count);
+                this.settle(window, cx);
+            }
+        });
     }
 
-    /// ⌘V in the text: copied files become attachments, a picture goes in where the cursor is,
-    /// HTML without the looks it brought along, text as text.
-    fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Files pasted, dropped on the text or picked for it: pictures go into the text where the
+    /// cursor is, anything else is attached.
+    fn add_dropped(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let (pictures, files): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| picture::is_picture(path));
+        for path in pictures {
+            let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            self.add_picture(name, move || picture::from_file(&path), window, cx);
+        }
+        if !files.is_empty() {
+            self.add_files(files, window, cx);
+        }
+    }
+
+    /// Files are dragged over the text (`on`) or left it again.
+    pub fn on_dragging(&mut self, on: bool) {
+        if let Some(view) = &self.view {
+            view.evaluate(&editor::call("dropping", on));
+        }
+    }
+
+    /// Files were dropped on the text at `(x, y)` of its page: the cursor goes there.
+    pub fn on_dropped(&mut self, paths: Vec<PathBuf>, (x, y): (i32, i32), window: &mut Window, cx: &mut Context<Self>) {
+        self.on_dragging(false);
+        if let Some(view) = &self.view {
+            view.evaluate(&editor::call("caret", (x, y)));
+        }
+        self.add_dropped(paths, window, cx);
+    }
+
+    /// ⌘V in the text: copied files as if dropped, a picture goes in where the cursor is, HTML
+    /// without the looks it brought along, a web address as a link, text as text (`plain`: text
+    /// only, whatever else there is).
+    fn paste(&mut self, plain: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = self.view.clone() else { return };
         let (mut paths, mut images, mut text) = (Vec::new(), Vec::new(), None);
         for entry in cx.read_from_clipboard().iter().flat_map(|item| item.entries().to_vec()) {
@@ -654,8 +802,14 @@ impl Composer {
                 ClipboardEntry::String(s) => text = Some(s.text().clone()),
             }
         }
+        if plain {
+            if let Some(text) = text {
+                view.evaluate(&editor::call("insert", html::text_to_html(&text)));
+            }
+            return;
+        }
         if !paths.is_empty() {
-            self.add_files(paths, window, cx);
+            self.add_dropped(paths, window, cx);
             return;
         }
         // a picture copied from a web page comes as HTML too, with nothing but the picture in it
@@ -664,96 +818,111 @@ impl Composer {
             .filter(|h| !html::html_to_text(h).trim().is_empty());
         if html.is_none() && !images.is_empty() {
             for image in &images {
-                self.paste_picture(image, window, cx);
+                let (format, bytes) = (image.format(), image.bytes().to_vec());
+                self.add_picture(self.picture_stem(), move || picture::prepare(format, bytes), window, cx);
             }
-        } else if let Some(markup) = html.or_else(|| text.map(|t| html::text_to_html(&t))) {
+        } else if let Some(markup) = html {
             view.evaluate(&editor::call("insert", markup));
+        } else if let Some(text) = text {
+            match web_address(&text) {
+                Some(url) => view.evaluate(&editor::call("link", url)),
+                None => view.evaluate(&editor::call("insert", html::text_to_html(&text))),
+            }
         }
     }
 
-    /// The picture goes into the text once it is ready (converted, shrunk if need be), and into
-    /// the draft as soon as there is one.
-    fn paste_picture(&mut self, image: &Image, window: &mut Window, cx: &mut Context<Self>) {
-        let extension = picture::extension(image.format());
-        let name = self.picture_name(extension);
+    /// The picture `prepare` makes (converted, shrunk if need be) goes into the text once it is
+    /// ready, as `name` plus the extension of what it became, and into the draft as soon as
+    /// there is one.
+    fn add_picture(
+        &mut self,
+        name: String,
+        prepare: impl FnOnce() -> Result<picture::Prepared, String> + Send + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.picture_names.push(name.clone());
         self.uploading += 1;
-        let (format, bytes) = (image.format(), image.bytes().to_vec());
-        let prepare = move || picture::prepare(format, bytes).map_err(jm_core::Error::general);
-        self.run(window, cx, prepare, move |this, result, window, cx| match result {
+        cx.notify();
+        self.run(window, cx, move || prepare().map_err(jm_core::Error::general), move |this, result, window, cx| match result {
             Ok(prepared) => {
-                let content_id = format!("picture.{extension}@{}", html::content_id_token());
-                let image =
-                    InlineImage { content_id: content_id.clone(), name, content_type: prepared.content_type.into(), bytes: prepared.bytes };
-                let url = html::data_url(&image);
-                // shown from its bytes, `cid:` again in what the page reports
-                let tag = html::picture_tag(&image.name, &content_id, prepared.size)
-                    .replacen(&format!("src=\"cid:{content_id}\""), &format!("src=\"{url}\" data-cid=\"{content_id}\""), 1);
+                let content_id = format!("picture.{}@{}", prepared.extension, html::content_id_token());
+                let image = InlineImage {
+                    content_id: content_id.clone(),
+                    name: format!("{name}.{}", prepared.extension),
+                    content_type: prepared.content_type.into(),
+                    bytes: prepared.bytes,
+                };
+                let shown = (content_id.to_lowercase(), html::data_url(&image));
+                // shown from its bytes, `cid:` in what the page reports
+                this.show_pictures(std::slice::from_ref(&shown));
                 if let Some(view) = &this.view {
-                    view.evaluate(&editor::call("insert", tag));
+                    view.evaluate(&editor::call("insert", html::picture_tag(&image.name, &content_id, prepared.size)));
                 }
-                this.pictures.push((content_id.to_lowercase(), url));
-                this.waiting.push(image);
+                this.pictures.push(shown);
+                this.waiting.push(Upload::Picture(image));
                 this.upload_waiting(window, cx);
             }
             Err(e) => {
                 this.upload_failed(format!("{name}: {e}"));
-                this.uploaded(window, cx);
+                this.uploading = this.uploading.saturating_sub(1);
+                this.settle(window, cx);
             }
         });
     }
 
-    /// `Bild 1.png`, `Bild 2.png`, …: a name the draft doesn't use yet.
-    fn picture_name(&self, extension: &str) -> String {
+    /// `Bild 1`, `Bild 2`, …: a name for a pasted picture the draft doesn't use yet.
+    fn picture_stem(&self) -> String {
         let stem = tr!("Picture", "Bild");
         (1..)
-            .map(|n| format!("{stem} {n}.{extension}"))
+            .map(|n| format!("{stem} {n}"))
             .find(|name| {
-                let alt = format!("alt=\"{}\"", html_escape::encode_double_quoted_attribute(name));
+                let alt = format!("alt=\"{}.", html_escape::encode_double_quoted_attribute(name));
                 !self.body_html.contains(&alt) && !self.picture_names.contains(name)
             })
             .unwrap_or_default()
     }
 
-    /// Attach the pasted pictures once the draft exists (saving it first if need be).
+    /// Send what waits into the draft, one after the other, once the draft exists (saving it
+    /// first if need be) and no save is on its way.
     fn upload_waiting(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.waiting.is_empty() {
+        if self.waiting.is_empty() || self.attaching || self.saving || self.loading {
             return;
         }
         let Some(id) = self.draft.as_ref().map(|d| d.id.clone()) else {
             self.save(false, window, cx);
             return;
         };
-        for image in std::mem::take(&mut self.waiting) {
-            let mailbox = self.mailbox.clone();
-            let id = id.clone();
-            let (name, content_id) = (image.name.clone(), image.content_id.clone());
-            self.run(window, cx, move || mailbox.add_inline_image(&id, &image), move |this, result, window, cx| {
-                if let Err(e) = result {
-                    this.upload_failed(format!("{name}: {e}"));
-                    // out of the text: the mail would show it broken
-                    if let Some(view) = &this.view {
-                        view.evaluate(&editor::call("drop", content_id));
+        let uploads = std::mem::take(&mut self.waiting);
+        let mailbox = self.mailbox.clone();
+        self.attaching = true;
+        cx.notify();
+        let work = move || {
+            let _turn = turn();
+            Ok(uploads.into_iter().map(|upload| upload.send(&mailbox, &id)).collect::<Vec<_>>())
+        };
+        self.run(window, cx, work, |this, done, window, cx| {
+            this.attaching = false;
+            for (name, picture, added) in done.unwrap_or_default() {
+                this.uploading = this.uploading.saturating_sub(1);
+                match added {
+                    Ok(attachment) => this.attachments.extend(attachment),
+                    Err(e) => {
+                        this.upload_failed(format!("{name}: {e}"));
+                        // out of the text: the mail would show it broken
+                        if let (Some(view), Some(content_id)) = (&this.view, picture) {
+                            view.evaluate(&editor::call("drop", content_id));
+                        }
                     }
                 }
-                this.uploaded(window, cx);
-            });
-        }
+            }
+            this.settle(window, cx);
+        });
     }
 
     fn upload_failed(&mut self, error: String) {
         self.error = Some(error);
         self.send_after_save = false;
-    }
-
-    /// An upload ended; a send that waited for the uploads goes on.
-    fn uploaded(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.uploading = self.uploading.saturating_sub(1);
-        if self.uploading == 0 && self.send_after_save && !self.saving {
-            self.send_after_save = false;
-            self.send_checked(window, cx);
-        }
-        cx.notify();
     }
 
     fn remove_attachment(&mut self, attachment_id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -837,16 +1006,6 @@ impl Render for Composer {
             self.cover = self.view.as_ref().and_then(|v| v.cover(px(f32::MAX)));
         }
 
-        let no_text = busy || self.view.is_none();
-        let format = |id: &'static str, icon: IconName, tip: &'static str, command: &'static str| {
-            Button::new(id)
-                .ghost()
-                .small()
-                .icon(icon)
-                .tooltip(tip)
-                .disabled(no_text)
-                .on_click(cx.listener(move |this, _, _, cx| this.format(command, cx)))
-        };
         let toolbar = h_flex()
             .h(px(TOP_H))
             .flex_none()
@@ -885,21 +1044,6 @@ impl Render for Composer {
                         this.show_cc = !this.show_cc;
                         cx.notify();
                     })),
-            )
-            .child(div().w(px(1.)).h(px(18.)).mx_1().bg(theme.border))
-            .child(
-                h_flex()
-                    .gap_0p5()
-                    .child(format("bold", IconName::Bold, tr!("Bold (⌘B)", "Fett (⌘B)"), "bold"))
-                    .child(format("italic", IconName::Italic, tr!("Italic (⌘I)", "Kursiv (⌘I)"), "italic"))
-                    .child(format("underline", IconName::Underline, tr!("Underline (⌘U)", "Unterstrichen (⌘U)"), "underline"))
-                    .child(format("bullets", IconName::List, tr!("Bulleted list (⇧⌘8)", "Aufzählung (⇧⌘8)"), "insertUnorderedList"))
-                    .child(format(
-                        "numbers",
-                        IconName::ListOrdered,
-                        tr!("Numbered list (⇧⌘7)", "Nummerierte Liste (⇧⌘7)"),
-                        "insertOrderedList",
-                    )),
             )
             .child(div().flex_1().text_size(theme::TEXT_SMALL).text_color(theme.muted_foreground).child(self.status()))
             .child(
@@ -1011,8 +1155,28 @@ impl Render for Composer {
     }
 }
 
+/// The text, if it is nothing but one web address.
+fn web_address(text: &str) -> Option<&str> {
+    let text = text.trim();
+    let web = text.starts_with("https://") || text.starts_with("http://");
+    (web && !text.contains(char::is_whitespace)).then_some(text)
+}
+
 /// Subject of a reply or forward ("RE:", "AW:", "FW:", "WG:" …).
 fn is_answer_subject(subject: &str) -> bool {
     let subject = subject.trim_start().to_lowercase();
     ["re:", "aw:", "fw:", "fwd:", "wg:", "antw:"].iter().any(|p| subject.starts_with(p))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::web_address;
+
+    #[test]
+    fn a_pasted_text_is_a_link_when_it_is_one_web_address() {
+        assert_eq!(web_address(" https://example.com/a?b=1\n"), Some("https://example.com/a?b=1"));
+        assert_eq!(web_address("see https://example.com"), None);
+        assert_eq!(web_address("https://example.com and more"), None);
+        assert_eq!(web_address("javascript:alert(1)"), None);
+    }
 }

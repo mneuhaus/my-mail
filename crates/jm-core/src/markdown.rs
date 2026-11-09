@@ -12,8 +12,11 @@ use markdown::mdast::{AlignKind, Node};
 
 /// A blank line between two blocks.
 const BLANK: &str = "<div><br></div>";
-pub(crate) const CELL: &str = "border:1px solid #d0d0d0;padding:4px 10px;vertical-align:top";
-pub(crate) const HEAD_CELL: &str = "border:1px solid #d0d0d0;padding:4px 10px;vertical-align:top;font-weight:bold;background-color:#f3f3f3";
+/// The inline styles of a table's cells, its header cells and a quote: also what Just Mail's
+/// editor gives the ones made there.
+pub const CELL: &str = "border:1px solid #d0d0d0;padding:4px 10px;vertical-align:top";
+pub const HEAD_CELL: &str = "border:1px solid #d0d0d0;padding:4px 10px;vertical-align:top;font-weight:bold;background-color:#f3f3f3";
+pub const QUOTE: &str = "margin:0 0 0 4px;padding-left:10px;border-left:3px solid #d0d0d0";
 const MONO: &str = "font-family:Menlo,Consolas,monospace";
 
 /// Mail HTML for the author's part of a draft (see [`crate::html::compose_blocks`]).
@@ -52,10 +55,7 @@ fn block(node: &Node) -> String {
             format!("<{tag}{start} style=\"margin-top:0;margin-bottom:0\">{items}</{tag}>")
         }
         Node::Table(table) => table_html(node, &table.align),
-        Node::Blockquote(_) => format!(
-            "<blockquote style=\"margin:0 0 0 4px;padding-left:10px;border-left:3px solid #d0d0d0\">{}</blockquote>",
-            blocks(node)
-        ),
+        Node::Blockquote(_) => format!("<blockquote style=\"{QUOTE}\">{}</blockquote>", blocks(node)),
         Node::Code(code) => {
             format!("<pre style=\"{MONO};font-size:10pt;margin:0;white-space:pre-wrap\">{}</pre>", text(&code.value))
         }

@@ -258,6 +258,16 @@ impl MailApp {
                     composer.update(cx, |c, cx| c.on_editor(message, window, cx));
                 }
             }
+            WebMessage::Dragging(on) => {
+                if let Pane::Composer(composer) = &self.pane {
+                    composer.update(cx, |c, _| c.on_dragging(on));
+                }
+            }
+            WebMessage::Dropped { paths, at } => {
+                if let Pane::Composer(composer) = &self.pane {
+                    composer.update(cx, |c, cx| c.on_dropped(paths, at, window, cx));
+                }
+            }
         }
     }
 }

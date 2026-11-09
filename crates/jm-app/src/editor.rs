@@ -3,14 +3,23 @@
 //! and links, stays as it is; nothing becomes plain text and back. Below the text, as the mail
 //! goes out and not editable: the signature, then a reply's quoted mail on request.
 //!
+//! Above the text the page has a format bar (GPUI cannot draw menus over a web view, the page
+//! can): size, bold, italic, underlined, struck through, colors, lists, quote, link, picture,
+//! table, and taking formats away. Its script and styles are `editor/page.js` and
+//! `editor/page.css`; `tools/editor-test` runs them in WebKit.
+//!
 //! The page reports every change (its HTML, pictures as `cid:` again), when it gets the keyboard,
-//! and when something is to be pasted: the app reads the pasteboard itself, so a screenshot
-//! becomes a picture of the draft, copied files attachments, and HTML from elsewhere comes in
-//! cleaned (`jm_core::html::clean_for_editing`). Keys: ⌘B, ⌘I, ⌘U, ⌘⇧7 numbered and ⌘⇧8 bulleted
-//! list, ⌘Z and ⌘⇧Z, ⌘X, ⌘C, ⌘V, ⌘A.
+//! and what only the app can do: read the pasteboard (a screenshot becomes a picture of the
+//! draft, copied files attachments, HTML from elsewhere comes in cleaned, see
+//! `jm_core::html::clean_for_editing`) and pick a picture from disk. Keys: ⌘B, ⌘I, ⌘U, ⇧⌘X struck
+//! through, ⌘K link, ⇧⌘7 numbered and ⇧⌘8 bulleted list, ⇥ and ⇧⇥ in lists and tables, ⌘Z and
+//! ⇧⌘Z, ⌘X, ⌘C, ⌘V, ⇧⌘V as text, ⌘A.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use gpui_kit::AssetSource as _;
+use html_escape::encode_double_quoted_attribute as attr;
+use jm_core::markdown;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -36,8 +45,15 @@ pub enum EditorEvent {
     Edited { html: String },
     /// The text got the keyboard.
     Focused,
-    /// ⌘V or "Paste": the app reads the pasteboard and inserts what fits.
-    Paste,
+    /// ⌘V or "Paste": the app reads the pasteboard and inserts what fits; `plain` as text only.
+    Paste {
+        #[serde(default)]
+        plain: bool,
+    },
+    /// The picture button: the app asks for files and puts them into the text.
+    Picture,
+    /// ⇧⇥ in the text: back to the field above it.
+    Leave,
     /// Every change made so far was reported (answer to `JM.flush()`).
     Flushed,
 }
@@ -64,9 +80,14 @@ pub fn next_page() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-/// `JM.<function>(arg)` for [`mailview::MailView::evaluate`].
-pub fn call(function: &str, arg: impl Serialize) -> String {
-    format!("JM.{function}({})", serde_json::to_string(&arg).unwrap_or_default())
+/// `JM.<function>(args…)` for [`mailview::MailView::evaluate`]; `args` is one value, or a tuple of them.
+pub fn call(function: &str, args: impl Serialize) -> String {
+    let args = match serde_json::to_value(args).unwrap_or_default() {
+        serde_json::Value::Array(list) => list.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(","),
+        serde_json::Value::Null => String::new(),
+        one => one.to_string(),
+    };
+    format!("JM.{function}({args})")
 }
 
 /// The HTML the pasteboard holds (copied from a web page, Word, Pages or the editor itself).
@@ -83,16 +104,58 @@ pub fn pasteboard_html() -> Option<String> {
     None
 }
 
+/// An icon of the app (Lucide, as GPUI's buttons show them) as SVG for the page.
+fn icon(name: &str) -> String {
+    let svg = crate::AppAssets.load(&format!("icons/{name}.svg")).ok().flatten().unwrap_or_default();
+    String::from_utf8_lossy(&svg).into_owned()
+}
+
+/// The format bar: a button runs a command of the page's script (`data-cmd`) or opens a menu
+/// (`data-menu`).
+fn bar() -> String {
+    let button = |kind: &str, name: &str, picture: &str, tip: &str| {
+        format!("<button type=\"button\" tabindex=\"-1\" data-{kind}=\"{name}\" title=\"{}\">{}</button>", attr(tip), icon(picture))
+    };
+    let separator = "<span class=\"sep\"></span>".to_string();
+    [
+        button("menu", "size", "a-large-small", tr!("Text size", "Schriftgröße")),
+        button("cmd", "bold", "bold", tr!("Bold (⌘B)", "Fett (⌘B)")),
+        button("cmd", "italic", "italic", tr!("Italic (⌘I)", "Kursiv (⌘I)")),
+        button("cmd", "underline", "underline", tr!("Underline (⌘U)", "Unterstrichen (⌘U)")),
+        button("cmd", "strike", "strikethrough", tr!("Strike through (⇧⌘X)", "Durchgestrichen (⇧⌘X)")),
+        button("menu", "color", "palette", tr!("Text color and marker", "Textfarbe und Markierung")),
+        separator.clone(),
+        button("cmd", "bullets", "list", tr!("Bulleted list (⇧⌘8, or “- ” at the start of a line)", "Aufzählung (⇧⌘8, oder „- “ am Zeilenanfang)")),
+        button("cmd", "numbers", "list-ordered", tr!("Numbered list (⇧⌘7, or “1. ” at the start of a line)", "Nummerierte Liste (⇧⌘7, oder „1. “ am Zeilenanfang)")),
+        button("cmd", "quote", "text-quote", tr!("Quote", "Zitat")),
+        separator.clone(),
+        button("menu", "link", "link", tr!("Link (⌘K)", "Link (⌘K)")),
+        button("cmd", "picture", "image", tr!("Insert pictures (or paste them, or drop them on the text)", "Bilder einfügen (oder per ⌘V, oder auf den Text ziehen)")),
+        button("menu", "table", "table", tr!("Table", "Tabelle")),
+        separator,
+        button("cmd", "clear", "remove-formatting", tr!("Remove formatting", "Formatierung entfernen")),
+    ]
+    .concat()
+}
+
 pub fn page(content: &Content, p: &Palette) -> String {
     let scheme = if p.dark { "dark" } else { "light" };
     let vars = format!(
-        ":root{{color-scheme:{scheme};--fg:{};--muted:{};--border:{};--hover:{};--link:{};--selection:{}}}",
+        ":root{{color-scheme:{scheme};--fg:{};--muted:{};--border:{};--hover:{};--active:{};--link:{};--selection:{};\
+         --bg:{};--field:{};--popover:{};--accent:{};--on:{};--danger:{}}}",
         css(p.foreground),
         css(p.muted),
         css(p.border),
         css(p.hover),
+        css(p.active),
         css(p.link),
         css(p.selection),
+        css(p.background),
+        css(p.background),
+        css(p.popover),
+        css(p.accent),
+        css(p.accent.opacity(0.14)),
+        css(p.danger),
     );
     let plain = if p.dark { format!("{}{}", mailview::PLAIN_CSS, mailview::PLAIN_DARK_CSS) } else { mailview::PLAIN_CSS.into() };
     let mail = |html: &str| {
@@ -106,201 +169,90 @@ pub fn page(content: &Content, p: &Palette) -> String {
         "signature": content.signature.map(mail),
         "quote": content.quote.map(mail),
         "focus": content.focus,
-        "labels": { "show": tr!("Show quoted mail", "Zitierte E-Mail anzeigen"), "hide": tr!("Hide quoted mail", "Zitierte E-Mail ausblenden") },
+        // what a mail needs inline, as Markdown from `jm` comes out
+        "styles": { "td": markdown::CELL, "th": markdown::HEAD_CELL, "quote": markdown::QUOTE },
+        "icons": { "check": icon("check"), "open": icon("external-link"), "unlink": icon("unlink"), "none": icon("ban") },
+        "labels": {
+            "small": tr!("Small", "Klein"),
+            "normal": tr!("Normal", "Normal"),
+            "large": tr!("Large", "Groß"),
+            "huge": tr!("Very large", "Sehr groß"),
+            "color": tr!("Text color", "Textfarbe"),
+            "automatic": tr!("Automatic", "Automatisch"),
+            "mark": tr!("Marker", "Markierung"),
+            "unmarked": tr!("None", "Keine"),
+            "address": tr!("Web or mail address", "Web- oder Mail-Adresse"),
+            "apply": tr!("Link (↩)", "Verlinken (↩)"),
+            "open": tr!("Open the link", "Link öffnen"),
+            "unlink": tr!("Remove the link", "Link entfernen"),
+            "table": tr!("Insert a table", "Tabelle einfügen"),
+            "rowAbove": tr!("Row above", "Zeile darüber"),
+            "rowBelow": tr!("Row below", "Zeile darunter"),
+            "columnLeft": tr!("Column to the left", "Spalte links"),
+            "columnRight": tr!("Column to the right", "Spalte rechts"),
+            "removeRow": tr!("Delete row", "Zeile löschen"),
+            "removeColumn": tr!("Delete column", "Spalte löschen"),
+            "removeTable": tr!("Delete table", "Tabelle löschen"),
+            "showQuote": tr!("Show quoted mail", "Zitierte E-Mail anzeigen"),
+            "hideQuote": tr!("Hide quoted mail", "Zitierte E-Mail ausblenden"),
+        },
     });
     // inside the script: no `<` that could end it
     let data = data.to_string().replace('<', "\\u003c");
-    let dark = if p.dark { DARK_CSS } else { "" };
-    let placeholder = html_escape::encode_double_quoted_attribute(tr!("Write your message…", "Deine Nachricht…"));
-    let signature_tip = html_escape::encode_double_quoted_attribute(tr!(
-        "Signature: change it under Accounts & signatures",
-        "Signatur: änderbar unter Konten & Signaturen"
-    ));
+    let placeholder = attr(tr!("Write your message…", "Deine Nachricht…"));
+    let signature_tip = attr(tr!("Signature: change it under Accounts & signatures", "Signatur: änderbar unter Konten & Signaturen"));
     let nonce = mailview::nonce();
     format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\">\
+        "<!doctype html><html class=\"{scheme}\"><head><meta charset=\"utf-8\">\
          <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'nonce-{nonce}'; \
          style-src 'unsafe-inline'; img-src data:; font-src data:; form-action 'none'; base-uri 'none'\">\
-         <style>{vars}{PAGE_CSS}{dark}</style></head><body>\
-         <div id=\"text\" contenteditable=\"true\" spellcheck=\"true\" data-placeholder=\"{placeholder}\"></div>\
+         <style>{vars}{PAGE_CSS}</style></head><body>\
+         <div id=\"bar\">{}</div><div id=\"pop\" hidden></div>\
+         <div id=\"main\"><div id=\"text\" contenteditable=\"true\" spellcheck=\"true\" data-placeholder=\"{placeholder}\"></div>\
          <div id=\"signature\" title=\"{signature_tip}\" hidden></div>\
-         <button id=\"quote-toggle\" hidden></button><div id=\"quote\" hidden></div>\
+         <button id=\"quote-toggle\" hidden></button><div id=\"quote\" hidden></div></div>\
+         <div id=\"frame\" hidden><i></i><span></span></div>\
          <script nonce=\"{nonce}\">const DATA = {data};{}{PAGE_JS}</script></body></html>",
+        bar(),
         mailview::MOUNT_JS
     )
 }
 
-const PAGE_CSS: &str = "\
-html,body{margin:0;background:transparent;min-height:100%}\
-body{padding:14px 20px 40px;font:14px/1.5 -apple-system,BlinkMacSystemFont,sans-serif;color:var(--fg);cursor:text}\
-::selection{background:var(--selection)}\
-#text{position:relative;outline:none;min-height:80px;overflow-wrap:break-word}\
-#text.empty::before{content:attr(data-placeholder);position:absolute;color:var(--muted);pointer-events:none}\
-#text a{color:var(--link)}\
-#text img{max-width:100%;height:auto}\
-#text img.loading{min-width:48px;min-height:32px;background:var(--hover)}\
-#text table{border-collapse:collapse}\
-#text ul,#text ol{margin-top:0;margin-bottom:0}\
-#signature{margin-top:20px;padding-top:14px;border-top:1px solid var(--border);cursor:default}\
-#quote-toggle{margin-top:16px;font:inherit;font-size:12px;color:var(--muted);background:transparent;border:0;\
-border-radius:6px;padding:2px 8px;cursor:pointer}\
-#quote-toggle:hover{background:var(--hover);color:var(--fg)}\
-#quote{margin-top:8px;padding:12px 16px;border-radius:8px;background:var(--hover);cursor:default}";
+/// The page with an empty text, a signature and a quote, for `tools/editor-test` (see `main`).
+pub fn sample_page(dark: bool) -> String {
+    let content = Content {
+        page: 1,
+        html: "",
+        pictures: &[],
+        signature: Some("<div>Alex Morgan<br>Northwind Studio</div>"),
+        quote: Some("<html><body><p>Hi Alex, thanks for the quote.</p></body></html>"),
+        focus: true,
+    };
+    page(&content, &Palette::sample(dark))
+}
 
-/// Dark mode: the text in the app's colors, whatever it brought along (as plain mail in the reader).
-const DARK_CSS: &str = "\
-#text *{color:inherit!important;background-color:transparent!important;border-color:var(--border)!important}\
-#text a,#text a *{color:var(--link)!important}";
+const PAGE_CSS: &str = include_str!("editor/page.css");
+const PAGE_JS: &str = include_str!("editor/page.js");
 
-const PAGE_JS: &str = r##"
-(() => {
-  const send = (m) => window.ipc.postMessage(JSON.stringify({ editor: Object.assign({ page: DATA.page }, m) }));
-  const text = document.getElementById("text");
-  const BLANK = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-  // pictures of the draft: `cid:` in the mail, shown from `data:` URLs (`JM.pictures`)
-  text.innerHTML = DATA.html;
-  for (const img of text.querySelectorAll("img")) {
-    const src = img.getAttribute("src") || "";
-    if (/^cid:/i.test(src)) {
-      img.dataset.cid = src.slice(4);
-      img.src = BLANK;
-      img.classList.add("loading");
+    #[test]
+    fn calls_take_one_argument_or_several() {
+        assert_eq!(call("flush", ()), "JM.flush()");
+        assert_eq!(call("insert", "<b>\"a\"</b>"), "JM.insert(\"<b>\\\"a\\\"</b>\")");
+        assert_eq!(call("caret", (12, 40)), "JM.caret(12,40)");
+        assert_eq!(call("dropping", true), "JM.dropping(true)");
     }
-  }
-  const pictures = (found) => {
-    for (const img of text.querySelectorAll("img[data-cid]")) {
-      const src = found[img.dataset.cid.toLowerCase()];
-      if (src) {
-        img.src = src;
-        img.classList.remove("loading");
-      }
+
+    #[test]
+    fn the_page_has_every_icon_and_no_way_out_of_its_script() {
+        let content = Content { page: 7, html: "</script><b>x</b>", pictures: &[], signature: None, quote: None, focus: false };
+        let page = page(&content, &Palette::sample(false));
+        assert!(!page.contains("</script><b>"));
+        assert!(page.contains("\\u003c/script>\\u003cb>x"));
+        // 13 buttons in the bar, 4 icons for its menus (in the script's data)
+        assert_eq!((page.matches("<svg").count(), page.matches("\\u003csvg").count()), (13, 4));
     }
-  };
-  pictures(DATA.pictures);
-  const html = () => {
-    const copy = text.cloneNode(true);
-    for (const img of copy.querySelectorAll("img[data-cid]")) {
-      img.setAttribute("src", "cid:" + img.dataset.cid);
-      img.removeAttribute("data-cid");
-      img.classList.remove("loading");
-      if (!img.classList.length) img.removeAttribute("class");
-    }
-    return copy.innerHTML;
-  };
-
-  const empty = () => text.classList.toggle("empty", !text.textContent.trim() && !text.querySelector("img, table, li, hr"));
-  empty();
-  document.execCommand("defaultParagraphSeparator", false, "div");
-  text.addEventListener("input", () => {
-    empty();
-    send({ type: "edited", html: html() });
-  });
-
-  // where the cursor was, for what the app inserts and its toolbar
-  let saved = null;
-  document.addEventListener("selectionchange", () => {
-    const s = getSelection();
-    if (s.rangeCount && text.contains(s.getRangeAt(0).commonAncestorContainer)) saved = s.getRangeAt(0).cloneRange();
-  });
-  const restore = () => {
-    if (document.activeElement !== text) text.focus();
-    if (saved) {
-      const s = getSelection();
-      s.removeAllRanges();
-      s.addRange(saved);
-    }
-  };
-  const focused = () => send({ type: "focused" });
-  text.addEventListener("focus", focused);
-  window.addEventListener("focus", () => document.activeElement === text && focused());
-
-  // a click below the text puts the cursor at its end
-  document.addEventListener("mousedown", (e) => {
-    if (e.target !== document.body && e.target !== document.documentElement) return;
-    e.preventDefault();
-    text.focus();
-    const s = getSelection();
-    s.selectAllChildren(text);
-    s.collapseToEnd();
-  });
-
-  const commands = { b: "bold", i: "italic", u: "underline", x: "cut", c: "copy", z: "undo" };
-  document.addEventListener("keydown", (e) => {
-    if (!e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
-    const key = e.key.toLowerCase();
-    let command = null;
-    if (e.shiftKey) {
-      if (e.code === "Digit7") command = "insertOrderedList";
-      else if (e.code === "Digit8") command = "insertUnorderedList";
-      else if (key === "z") command = "redo";
-    } else if (key === "a") {
-      e.preventDefault();
-      getSelection().selectAllChildren(text.contains(getSelection().anchorNode) ? text : document.body);
-    } else if (key === "v") {
-      e.preventDefault();
-      send({ type: "paste" });
-    } else {
-      command = commands[key];
-    }
-    if (command) {
-      e.preventDefault();
-      document.execCommand(command);
-    }
-  }, true);
-  text.addEventListener("paste", (e) => {
-    e.preventDefault();
-    send({ type: "paste" });
-  });
-  // files go in through the paperclip; dropped, WebKit would try to open them
-  for (const type of ["dragover", "drop"]) {
-    text.addEventListener(type, (e) => [...(e.dataTransfer?.types || [])].includes("Files") && e.preventDefault());
-  }
-
-  if (DATA.signature) {
-    const signature = document.getElementById("signature");
-    mount(signature, DATA.signature);
-    signature.hidden = false;
-  }
-  if (DATA.quote) {
-    const quote = document.getElementById("quote"), toggle = document.getElementById("quote-toggle");
-    toggle.textContent = DATA.labels.show;
-    toggle.hidden = false;
-    toggle.addEventListener("click", () => {
-      if (!quote.shadowRoot) mount(quote, DATA.quote);
-      quote.hidden = !quote.hidden;
-      toggle.textContent = quote.hidden ? DATA.labels.show : DATA.labels.hide;
-    });
-  }
-
-  window.JM = {
-    insert(markup) {
-      restore();
-      document.execCommand("insertHTML", false, markup);
-    },
-    command(name) {
-      restore();
-      document.execCommand(name);
-    },
-    pictures,
-    // a picture that could not go into the draft
-    drop(cid) {
-      for (const img of text.querySelectorAll("img[data-cid]")) if (img.dataset.cid === cid) img.remove();
-      empty();
-      send({ type: "edited", html: html() });
-    },
-    focus() {
-      text.focus();
-      if (!saved) {
-        const s = getSelection();
-        s.selectAllChildren(text);
-        s.collapseToStart();
-      }
-    },
-    // every change was sent right away; this one comes after them
-    flush: () => send({ type: "flushed" }),
-  };
-  if (DATA.focus) JM.focus();
-  send({ type: "ready" });
-})();
-"##;
+}

@@ -3,6 +3,7 @@
 //! Environment: `JUST_MAIL_HOME=<dir>` uses another config directory (tests, screenshots),
 //! `JUST_MAIL_THEME=light|dark` overrides the system appearance, `JUST_MAIL_LANG=en|de` the
 //! language, `JUST_MAIL_START=setup` opens the account settings (screenshots).
+//! `JUST_MAIL_EDITOR_PAGE=light|dark` prints the draft editor's page and ends (`tools/editor-test`).
 
 mod actions;
 mod app;
@@ -30,8 +31,8 @@ gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
         Mail, MailOpen, Send, Archive, Trash, Pin, PinOff, Reply, ReplyAll, Forward, Paperclip, SquarePen, Pencil, Lock,
-        Image, Download, FolderInput, CircleCheckBig, Save, ListTodo, LogIn, KeyRound, Bold, Italic, Underline, List,
-        ListOrdered
+        Image, Download, FolderInput, CircleCheckBig, Save, ListTodo, LogIn, KeyRound, Bold, Italic, Underline,
+        Strikethrough, List, ListOrdered, TextQuote, Link, Unlink, Table, RemoveFormatting
     ]
 );
 
@@ -97,6 +98,10 @@ fn apply_theme(window: Option<&mut Window>, cx: &mut App) {
 }
 
 fn main() {
+    if let Ok(theme) = std::env::var("JUST_MAIL_EDITOR_PAGE") {
+        print!("{}", editor::sample_page(theme == "dark"));
+        return;
+    }
     gpui_kit::application().with_assets(AppAssets).run(|cx| {
         gpui_kit::init(cx);
         theme::register(cx);
