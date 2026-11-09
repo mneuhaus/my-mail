@@ -35,7 +35,7 @@ pub fn prepare(format: ImageFormat, bytes: Vec<u8>) -> Result<Prepared, String> 
         ImageFormat::Webp => image::ImageFormat::WebP,
         ImageFormat::Bmp => image::ImageFormat::Bmp,
         ImageFormat::Tiff => image::ImageFormat::Tiff,
-        _ => return Err(UNKNOWN.into()),
+        _ => return Err(unknown()),
     };
     for_mail(source, bytes)
 }
@@ -50,7 +50,9 @@ pub fn from_file(path: &Path) -> Result<Prepared, String> {
     }
 }
 
-const UNKNOWN: &str = "this kind of picture can't go into a mail";
+fn unknown() -> String {
+    crate::tr!("this kind of picture can't go into a mail", "diese Art Bild kann nicht in eine Mail").into()
+}
 
 /// The picture as a JPEG, made by `sips` (part of macOS).
 #[cfg(target_os = "macos")]
@@ -66,13 +68,13 @@ fn as_jpeg(path: &Path) -> Result<Vec<u8>, String> {
     let _ = std::fs::remove_file(&made);
     match (done, bytes) {
         (Ok(done), Ok(bytes)) if done.status.success() => Ok(bytes),
-        _ => Err(UNKNOWN.into()),
+        _ => Err(unknown()),
     }
 }
 
 #[cfg(not(target_os = "macos"))]
 fn as_jpeg(_: &Path) -> Result<Vec<u8>, String> {
-    Err(UNKNOWN.into())
+    Err(unknown())
 }
 
 /// JPEG, GIF and PNG stay what they are, anything else becomes PNG. A photo taken sideways is
@@ -95,7 +97,7 @@ fn for_mail(source: image::ImageFormat, bytes: Vec<u8>) -> Result<Prepared, Stri
     let mut halved = 0;
     while bytes.len() > MAX_ATTACHMENT_BYTES {
         if kind == Gif || halved == 4 {
-            return Err("the picture is larger than 3 MB".into());
+            return Err(crate::tr!("the picture is larger than 3 MB", "das Bild ist größer als 3 MB").into());
         }
         picture = picture.resize(picture.width() / 2, picture.height() / 2, FilterType::Triangle);
         bytes = encode(&picture, kind)?;
@@ -184,7 +186,7 @@ mod tests {
         assert_eq!((prepared.content_type, prepared.extension, prepared.size), ("image/jpeg", "jpg", (64, 32)));
         assert!(from_file(&dir.join("missing.heic")).is_err());
         std::fs::write(dir.join("text.heic"), b"no picture").unwrap();
-        assert_eq!(from_file(&dir.join("text.heic")).unwrap_err(), UNKNOWN);
+        assert_eq!(from_file(&dir.join("text.heic")).unwrap_err(), unknown());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -3,6 +3,10 @@
 //! Typing suggests people from the mail ([`jm_core::contacts`]): ↑/↓ pick, ↩, ⇥ or a comma take
 //! one, esc closes the list. A typed address becomes a chip at a comma, with ↩ or when leaving
 //! the field. The field's text stays `Name <address>, …`.
+//!
+//! A chip shows the name alone only for people the mail knows under that name. A recipient a
+//! draft came with (from `jm`, say) that the mail never saw under its name shows its address
+//! too: a name is whatever the one who wrote it down likes.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -79,10 +83,12 @@ impl RecipientField {
 
     /// Show `list` as chips (a draft as loaded).
     pub fn set(&mut self, list: &[Recipient], window: &mut Window, cx: &mut Context<Self>) {
+        let book = AddressBook::of(&self.account, cx);
         let mut text = String::new();
         let mut chips = Vec::new();
         for recipient in list {
-            let token = chip_token(recipient);
+            let known = book.iter().any(|c| c.address.eq_ignore_ascii_case(&recipient.address) && c.name == recipient.name);
+            let token = chip_token(recipient, known);
             chips.push((text.len()..text.len() + token.text().len(), token.clone()));
             text.push_str(token.text());
         }
@@ -171,7 +177,8 @@ impl RecipientField {
             for (range, recipient) in edits {
                 let len = match recipient {
                     Some(recipient) => {
-                        let token = chip_token(&recipient);
+                        // typed, or picked from the people the mail knows
+                        let token = chip_token(&recipient, true);
                         let len = token.text().len();
                         if state.replace_range_with_token(range.clone(), token, window, cx).is_err() {
                             continue; // an input method is composing; the next edit tries again
@@ -205,10 +212,11 @@ impl RecipientField {
     }
 }
 
-/// A recipient as a chip: the name, its text `Name <address>, ` (the comma inside, so ⌫ takes it
-/// along) and the address as id.
-fn chip_token(recipient: &Recipient) -> InlineToken {
-    InlineToken::new(recipient.address.to_lowercase(), format!("{}, ", recipient.full())).with_label(recipient.display().to_string())
+/// A recipient as a chip: the name (with the address, unless the mail `known`s it under that
+/// name), its text `Name <address>, ` (the comma inside, so ⌫ takes it along) and the address as id.
+fn chip_token(recipient: &Recipient, known: bool) -> InlineToken {
+    let label = if known { recipient.display().to_string() } else { recipient.full() };
+    InlineToken::new(recipient.address.to_lowercase(), format!("{}, ", recipient.full())).with_label(label)
 }
 
 fn chip_ranges(state: &InputState) -> Vec<Range<usize>> {
@@ -347,7 +355,10 @@ impl Render for RecipientField {
             .w_full()
             .capture_action(cx.listener(|this, _: &MoveDown, _, cx| this.move_highlight(true, cx)))
             .capture_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_highlight(false, cx)))
-            .capture_action(cx.listener(|this, _: &Enter, window, cx| {
+            .capture_action(cx.listener(|this, action: &Enter, window, cx| {
+                if action.secondary {
+                    return; // ⌘↩ sends, also from here
+                }
                 if this.suggestions.is_empty() {
                     this.make_chips(true, window, cx);
                 } else {

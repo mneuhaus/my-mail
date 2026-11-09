@@ -2,8 +2,10 @@
 // (the signature, the quote) in a shadow root. The app calls `JM.…`; the page reports through `send`.
 (() => {
   const send = (m) => window.ipc.postMessage(JSON.stringify({ editor: Object.assign({ page: DATA.page }, m) }));
+  // the page's own elements, before a draft's text is in the page: it may use the same ids
   const $ = (id) => document.getElementById(id);
-  const text = $("text"), bar = $("bar"), pop = $("pop"), frame = $("frame");
+  const text = $("text"), bar = $("bar"), pop = $("pop"), frame = $("frame"), main = $("main");
+  const signature = $("signature"), quoted = $("quote"), quoteToggle = $("quote-toggle");
   const L = DATA.labels, STYLES = DATA.styles;
   const BLANK = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
   // What the script does to the text (as opposed to what is typed) goes through here.
@@ -28,9 +30,29 @@
 
   // Pictures of the draft are `cid:` in the mail and show from `data:` URLs, by content id (lowercase).
   const known = Object.assign({}, DATA.pictures);
-  // Mail HTML as the page shows it.
+  // Mail HTML as the page shows it: pictures from their bytes, and nothing that could act on this page instead of
+  // being text (a draft's HTML may come from anywhere): no styles, forms or frames, no names that stand for parts
+  // of the page, nothing laid over the page or hidden in it. `cleaned` says that something was taken out.
+  const ACTIVE = "script, style, link, meta, base, title, form, input, button, select, textarea, iframe, frame, object, embed, applet";
+  const LAYOUT = ["position", "z-index", "pointer-events", "display", "visibility", "opacity"];
+  let cleaned = false;
   const shown = (html) => {
     const parsed = el("template", { innerHTML: html });
+    for (const active of parsed.content.querySelectorAll(ACTIVE)) {
+      active.remove();
+      cleaned = true;
+    }
+    for (const each of parsed.content.querySelectorAll("[name], [contenteditable], [style]")) {
+      for (const name of ["name", "contenteditable"]) {
+        cleaned ||= each.hasAttribute(name);
+        each.removeAttribute(name);
+      }
+      for (const property of LAYOUT) {
+        cleaned ||= !!each.style.getPropertyValue(property);
+        each.style.removeProperty(property);
+      }
+      if (each.getAttribute("style") === "") each.removeAttribute("style");
+    }
     for (const img of parsed.content.querySelectorAll("img")) {
       const src = img.getAttribute("src") || "";
       if (!/^cid:/i.test(src)) continue;
@@ -180,8 +202,10 @@
   empty();
   tagMarked();
   exec("defaultParagraphSeparator", "div");
-  history.states.push({ html: html(), where: null });
+  // the draft as it came is where undo ends; what was taken out of it is a change to save
+  history.states.push({ html: cleaned ? DATA.html : html(), where: null });
   history.at = 0;
+  if (cleaned) changed();
   text.addEventListener("input", (e) => e.isComposing || changed(scripted ? "" : e.inputType));
   text.addEventListener("compositionend", () => changed("insertText"));
   text.addEventListener("beforeinput", (e) => {
@@ -649,7 +673,7 @@
   document.addEventListener("mousedown", (e) => {
     if (opened && !pop.contains(e.target) && !bar.contains(e.target)) close();
     // a click below the text puts the cursor at its end
-    if (![document.documentElement, document.body, $("main")].includes(e.target)) return;
+    if (![document.documentElement, document.body, main].includes(e.target)) return;
     e.preventDefault();
     text.focus();
     caretIn(text);
@@ -735,19 +759,20 @@
   // ---- below the text: the signature and a reply's quote, as they go out ------------------------------------
 
   if (DATA.signature) {
-    mount($("signature"), DATA.signature);
-    $("signature").hidden = false;
+    mount(signature, DATA.signature);
+    signature.hidden = false;
   }
   if (DATA.quote) {
-    const quoted = $("quote"), toggle = $("quote-toggle");
-    toggle.textContent = L.showQuote;
-    toggle.hidden = false;
-    toggle.addEventListener("click", () => {
+    quoteToggle.textContent = L.showQuote;
+    quoteToggle.hidden = false;
+    quoteToggle.addEventListener("click", () => {
       if (!quoted.shadowRoot) mount(quoted, DATA.quote);
       quoted.hidden = !quoted.hidden;
-      toggle.textContent = quoted.hidden ? L.showQuote : L.hideQuote;
+      quoteToggle.textContent = quoted.hidden ? L.showQuote : L.hideQuote;
     });
   }
+  // WebKit's menu (spelling, look up, copy) in the text only: around it, it offers "Reload"
+  document.addEventListener("contextmenu", (e) => inText(e.target) || pop.contains(e.target) || e.preventDefault());
 
   // ---- what the app asks for ---------------------------------------------------------------------------------
 

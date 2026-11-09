@@ -8,6 +8,9 @@
 //! shortcuts on (`window.ipc`). Mail with its own background colors shows as designed, on light;
 //! plain mail takes the app's colors, in dark mode all of them.
 //!
+//! The web view keeps nothing between mails (no cookies, no cache), previews no links, downloads
+//! nothing, and navigates nowhere.
+//!
 //! The draft editor uses the same web view for its own page (see `editor`): reader and editor
 //! never show at the same time.
 
@@ -37,6 +40,8 @@ pub enum WebMessage {
     Key { key: String, cmd: bool, shift: bool },
     /// "Edit" on a draft below the mail.
     Edit(String),
+    /// A click into the mail: the keyboard is the web view's now.
+    Focused,
     /// From the draft editor's page.
     Editor(crate::editor::EditorMessage),
     /// Files are dragged over the draft editor's page, or left it again.
@@ -45,6 +50,10 @@ pub enum WebMessage {
     /// Files were dropped on the draft editor's page, at this point of it.
     #[serde(skip)]
     Dropped { paths: Vec<PathBuf>, at: (i32, i32) },
+    /// WebKit's process for the page ended (it crashed, or macOS took its memory): the page is
+    /// blank until it is loaded again.
+    #[serde(skip)]
+    Ended,
 }
 
 /// One mail on the page.
@@ -145,6 +154,9 @@ impl MailView {
     pub fn new(window: &Window) -> wry::Result<(Self, mpsc::UnboundedReceiver<WebMessage>)> {
         let (tx, rx) = mpsc::unbounded();
         let placed: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::default();
+        let shown: Rc<Cell<Option<u64>>> = Rc::default();
+        #[cfg(target_os = "macos")]
+        use wry::WebViewBuilderExtDarwin as _;
         let web = wry::WebViewBuilder::new()
             .with_transparent(true)
             .with_visible(false)
@@ -154,6 +166,10 @@ impl MailView {
             .with_devtools(cfg!(debug_assertions))
             // the page and its mails, nothing else: links go through `WebMessage::Open`
             .with_navigation_handler(|url| url == "about:blank")
+            // nothing a mail links to is fetched: not by "Download Linked File" of WebKit's menu,
+            // not by a preview of the link; and no mail finds what another one left behind
+            .with_download_started_handler(|_, _| false)
+            .with_incognito(true)
             .with_ipc_handler({
                 let tx = tx.clone();
                 move |request| {
@@ -165,7 +181,7 @@ impl MailView {
             // files dragged onto the draft's text are the app's (WebKit would try to open them);
             // any other drag, text moved within the text, stays WebKit's
             .with_drag_drop_handler({
-                let (placed, files) = (placed.clone(), Cell::new(false));
+                let (tx, placed, files) = (tx.clone(), placed.clone(), Cell::new(false));
                 move |event| {
                     let ours = files.get();
                     match event {
@@ -190,12 +206,20 @@ impl MailView {
                     }
                     ours
                 }
-            })
-            .build_as_child(window)?;
+            });
+        #[cfg(target_os = "macos")]
+        let web = web.with_allow_link_preview(false).with_on_web_content_process_terminate_handler({
+            let shown = shown.clone();
+            move || {
+                shown.set(None);
+                let _ = tx.unbounded_send(WebMessage::Ended);
+            }
+        });
+        let web = web.build_as_child(window)?;
         keys_stay_in_the_page();
         let view = Self {
             web: Rc::new(web),
-            shown: Rc::default(),
+            shown,
             placed,
             visible: Rc::default(),
             covered: Rc::default(),
@@ -482,7 +506,7 @@ const PAGE_CSS: &str = "\
 html,body{margin:0;background:transparent}\
 body{padding:0 24px 24px;font:14px/1.45 -apple-system,BlinkMacSystemFont,sans-serif;color:var(--fg)}\
 ::selection{background:var(--selection)}\
-.card{border:1px solid var(--border);border-radius:10px;background:var(--card);overflow:hidden}\
+.card{border:1px solid var(--border);border-radius:10px;background:var(--card);overflow:hidden;contain:paint}\
 .card+.card{margin-top:12px}\
 .head{padding:16px 24px 0}\
 .row{display:flex;gap:12px;align-items:center}\
@@ -522,23 +546,29 @@ const mount = (() => {
       else if (rule.cssRules) retarget(rule.cssRules);
     }
   }
+  // a mail may name an element "body" or "head", and `doc.body` would then be that element
+  const part = (doc, name) => Object.getOwnPropertyDescriptor(Document.prototype, name).get.call(doc);
+  const all = (doc, selector) => Document.prototype.querySelectorAll.call(doc, selector);
   function mount(host, mail) {
     const doc = new DOMParser().parseFromString(mail.html, "text/html");
+    // nothing that could run, load or lead elsewhere (the content policy holds them back too)
+    for (const el of all(doc, "script, iframe, frame, frameset, object, embed, applet, base, meta, link:not([rel~='stylesheet'])")) el.remove();
+    const head = part(doc, "head"), from = part(doc, "body"), html = part(doc, "documentElement");
     const root = host.attachShadow({ mode: "open" });
     const own = document.createElement("style");
     own.textContent = mail.css;
     root.append(own);
-    for (const el of doc.head.querySelectorAll("style, link[rel~='stylesheet']")) root.append(document.importNode(el, true));
+    for (const el of head.querySelectorAll("style, link")) root.append(document.importNode(el, true));
     const body = document.createElement("div");
     for (const name of ["style", "dir", "lang"]) {
-      const value = doc.body.getAttribute(name) || (name !== "style" && doc.documentElement.getAttribute(name));
+      const value = from.getAttribute(name) || (name !== "style" && html.getAttribute(name));
       if (value) body.setAttribute(name, value);
     }
-    body.className = ("jm-body " + (doc.body.getAttribute("class") || "")).trim();
-    const bg = doc.body.getAttribute("bgcolor"), color = doc.body.getAttribute("text");
+    body.className = ("jm-body " + (from.getAttribute("class") || "")).trim();
+    const bg = from.getAttribute("bgcolor"), color = from.getAttribute("text");
     if (bg) body.style.backgroundColor = bg;
     if (color) body.style.color = color;
-    for (const node of doc.body.childNodes) body.append(document.importNode(node, true));
+    for (const node of [...from.childNodes]) body.append(document.importNode(node, true));
     root.append(body);
     for (const style of root.querySelectorAll("style")) if (style.sheet) retarget(style.sheet.cssRules);
   }
@@ -552,7 +582,14 @@ const mount = (() => {
 const PAGE_JS: &str = r##"
 (() => {
   const send = (m) => window.ipc.postMessage(JSON.stringify(m));
-  for (const host of document.querySelectorAll("[data-mail]")) mount(host, MAILS[+host.dataset.mail]);
+  // the keyboard is here now: ⌘C copies from the mail, not from the field that had it before
+  window.addEventListener("focus", () => send("focused"));
+  // WebKit's own menu only for what is selected, a link or a picture: on the bare page it offers
+  // "Reload", which would leave the page empty
+  document.addEventListener("contextmenu", (e) => {
+    const target = e.composedPath()[0];
+    if (!document.getSelection().toString() && !(target.closest && target.closest("a[href], img"))) e.preventDefault();
+  });
 
   const own = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End", " ",
     "Tab", "Shift", "Meta", "Control", "Alt", "CapsLock", "Fn", "Dead", "Unidentified"]);
@@ -579,7 +616,8 @@ const PAGE_JS: &str = r##"
     const el = target.closest && target.closest("a[href], area[href], [data-edit]");
     if (!el) return;
     e.preventDefault();
-    if (el.dataset.edit) return send({ edit: el.dataset.edit });
+    // the page's own button only: a mail cannot have one
+    if (el.dataset.edit) return el.getRootNode() === document && send({ edit: el.dataset.edit });
     const href = el.getAttribute("href");
     if (href.startsWith("#")) {
       const root = el.getRootNode(), name = href.slice(1);
@@ -589,5 +627,14 @@ const PAGE_JS: &str = r##"
       send({ open: el.href });
     }
   }, true);
+
+  // last, so a mail that cannot be shown takes neither the keys nor the other mails along
+  for (const host of document.querySelectorAll("[data-mail]")) {
+    try {
+      mount(host, MAILS[+host.dataset.mail]);
+    } catch (error) {
+      host.textContent = String(error);
+    }
+  }
 })();
 "##;

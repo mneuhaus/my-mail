@@ -20,7 +20,7 @@ use jm_core::html::InlineImage;
 use jm_core::{AccountConfig, Attachment, Body, Config, FlagStatus, Folder, Mailbox, Message, ids};
 
 use crate::actions::{self, *};
-use crate::composer::{Composer, ComposerEvent};
+use crate::composer::{Composer, ComposerEvent, Notice};
 use crate::mailview::MailView;
 use crate::recipients::AddressBook;
 use crate::setup::{Setup, SetupEvent};
@@ -29,6 +29,8 @@ use crate::{i18n, tr};
 const PAGE: u32 = 50;
 const LIST_REFRESH: Duration = Duration::from_secs(60);
 const FOLDER_REFRESH: Duration = Duration::from_secs(300);
+/// Folder counts follow what was done to mail after this long: once for a run of changes.
+const FOLDERS_SOON: Duration = Duration::from_millis(1500);
 /// People to suggest change slowly: whom you wrote to lately.
 const CONTACTS_REFRESH: Duration = Duration::from_secs(1800);
 
@@ -153,12 +155,26 @@ pub struct MailApp {
     generation: u64,
     /// Row a context menu action applies to (instead of the selection).
     menu_target: Option<String>,
+    /// Mail on its way to another folder: a list that was fetched before the move must not show
+    /// it again.
+    filing: HashSet<String>,
+    /// A reply or forward is being made (its number, counted in `answers`): the editor opens
+    /// when it is there, unless something else was opened meanwhile.
+    answering: Option<u64>,
+    answers: u64,
+    /// Has the keyboard while a reply is being made: what is typed ahead must not be the
+    /// list's shortcuts.
+    wait_focus: FocusHandle,
+    /// Accounts whose folder counts are to be fetched soon (see `FOLDERS_SOON`).
+    folders_due: HashSet<usize>,
     /// The open mail's body and conversation (WebKit); `None` if it could not be made.
     pub mail_view: Option<MailView>,
     last_folder_refresh: Instant,
     last_contacts_refresh: Instant,
     /// The unread count on the Dock icon, as last set.
     badge: u32,
+    /// Listens to the composer or the settings in the pane.
+    pane_subscription: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -210,10 +226,16 @@ impl MailApp {
             list_focus: cx.focus_handle(),
             generation: 0,
             menu_target: None,
+            filing: HashSet::new(),
+            answering: None,
+            answers: 0,
+            wait_focus: cx.focus_handle(),
+            folders_due: HashSet::new(),
             mail_view,
             last_folder_refresh: Instant::now(),
             last_contacts_refresh: Instant::now(),
             badge: 0,
+            pane_subscription: None,
             _subscriptions: subscriptions,
         };
         app.reload_accounts(window, cx);
@@ -226,6 +248,15 @@ impl MailApp {
 
     pub fn focus_list(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.list_focus.focus(window, cx);
+    }
+
+    /// What the right column shows. A reply that is still being made no longer opens then.
+    fn set_pane(&mut self, pane: Pane) {
+        self.answering = None;
+        if !matches!(pane, Pane::Composer(_) | Pane::Setup(_)) {
+            self.pane_subscription = None;
+        }
+        self.pane = pane;
     }
 
     /// Take the keyboard back from the mail's web view, if it has it.
@@ -304,7 +335,7 @@ impl MailApp {
             self.show(View::Folder { account: 0, folder: "inbox".into() }, window, cx);
         }
         if matches!(self.pane, Pane::Setup(_)) && self.config.accounts.iter().all(|a| a.id.is_empty()) {
-            self.pane = Pane::Empty;
+            self.set_pane(Pane::Empty);
         }
         cx.notify();
     }
@@ -328,11 +359,11 @@ impl MailApp {
         self.load_list(false, window, cx);
         let Some((account, id, draft)) = open else { return };
         let Some(ix) = self.accounts.iter().position(|a| a.config.id == account) else {
-            self.pane = Pane::Empty;
+            self.set_pane(Pane::Empty);
             return;
         };
         if draft {
-            self.open_draft(ix, id, window, cx);
+            self.load_draft(ix, id, window, cx);
         } else {
             if let Some(view) = &mut self.mail_view {
                 view.forget();
@@ -343,20 +374,37 @@ impl MailApp {
 
     pub fn open_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let setup = cx.new(|cx| Setup::new(window, cx));
-        self._subscriptions.push(cx.subscribe_in(&setup, window, |this, _, ev: &SetupEvent, window, cx| match ev {
+        let subscription = cx.subscribe_in(&setup, window, |this, _, ev: &SetupEvent, window, cx| match ev {
             SetupEvent::AccountsChanged => this.reload_accounts(window, cx),
             SetupEvent::Close => {
-                this.pane = Pane::Empty;
+                this.set_pane(Pane::Empty);
                 cx.notify();
             }
-        }));
-        self.pane = Pane::Setup(setup);
+        });
+        self.set_pane(Pane::Setup(setup));
+        self.pane_subscription = Some(subscription);
         cx.notify();
     }
 
+    /// The folder counts of account `ix` soon: once for all that was done to its mail meanwhile
+    /// (walking through unread mail asks for them with every mail).
+    fn load_folders_soon(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.folders_due.insert(ix) {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(FOLDERS_SOON).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.folders_due.remove(&ix);
+                this.load_folders(ix, window, cx);
+            });
+        })
+        .detach();
+    }
+
     fn load_folders(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let mailbox = self.accounts[ix].mailbox.clone();
-        let id = self.accounts[ix].config.id.clone();
+        let Some(account) = self.accounts.get(ix) else { return };
+        let (mailbox, id) = (account.mailbox.clone(), account.config.id.clone());
         self.run(window, cx, move || mailbox.folders(), move |this, result, _, _| {
             let Some(account) = this.accounts.get_mut(ix).filter(|a| a.config.id == id) else { return };
             match result {
@@ -372,7 +420,7 @@ impl MailApp {
 
     /// Whom the account wrote to or heard from, for the recipient suggestions of its drafts.
     fn load_contacts(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let account = &self.accounts[ix];
+        let Some(account) = self.accounts.get(ix) else { return };
         if account.config.read_only {
             return;
         }
@@ -387,8 +435,8 @@ impl MailApp {
     /// Count the inbox again (one request), so new mail shows in the sidebar and on the Dock
     /// icon within a minute, not only with the next round over all folders.
     fn count_inbox(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let mailbox = self.accounts[ix].mailbox.clone();
-        let id = self.accounts[ix].config.id.clone();
+        let Some(account) = self.accounts.get(ix) else { return };
+        let (mailbox, id) = (account.mailbox.clone(), account.config.id.clone());
         self.run(window, cx, move || mailbox.folder("inbox"), move |this, result, _, _| {
             let (Some(account), Ok(counted)) = (this.accounts.get_mut(ix).filter(|a| a.config.id == id), result) else {
                 return;
@@ -424,7 +472,7 @@ impl MailApp {
             self.rows.clear();
             self.selected = None;
             if !matches!(self.pane, Pane::Composer(_) | Pane::Setup(_)) {
-                self.pane = Pane::Empty;
+                self.set_pane(Pane::Empty);
             }
             self.list_scroll.scroll_to_item(0, ScrollStrategy::Top);
         }
@@ -508,10 +556,26 @@ impl MailApp {
                 if view == View::Pinned {
                     rows.sort_by_key(|r| std::cmp::Reverse(r.message.date()));
                 }
+                // what is on its way to another folder was still here when this was fetched
+                rows.retain(|r| !this.filing.contains(&r.message.id));
+                if silent {
+                    // a refresh in the background keeps what is on the screen: all of it when it
+                    // failed (the network is not back after a wake), and the pages below the first
+                    if error.is_some() {
+                        return;
+                    }
+                    let fresh: HashSet<String> = rows.iter().map(|r| r.message.id.clone()).collect();
+                    let oldest = rows.last().and_then(|r| r.message.date());
+                    let below = |r: &Row| !fresh.contains(&r.message.id) && r.message.date() < oldest;
+                    if matches!(view, View::Folder { .. }) && this.rows.iter().any(below) {
+                        rows.extend(std::mem::take(&mut this.rows).into_iter().filter(below));
+                        next = std::mem::take(&mut this.next);
+                    }
+                }
                 this.rows = rows;
                 this.next = next;
                 this.list_error = error.as_ref().map(|e| e.to_string());
-                if let Some(e) = error.filter(|_| !silent) {
+                if let Some(e) = error {
                     this.notify_error(tr!("Could not load mail", "E-Mails konnten nicht geladen werden"), &e, window, cx);
                 }
             },
@@ -540,7 +604,7 @@ impl MailApp {
                         if let Ok(page) = &page {
                             ids::remember(mailbox.id(), page.messages.iter().map(|m| m.id.as_str()));
                         }
-                        (ix, page)
+                        (ix, link, page)
                     })
                     .collect::<Vec<_>>())
             },
@@ -549,19 +613,18 @@ impl MailApp {
                 if this.generation != generation {
                     return;
                 }
-                for (ix, page) in result.unwrap_or_default() {
-                    if let Ok(page) = page {
-                        let known: std::collections::HashSet<String> =
-                            this.rows.iter().map(|r| r.message.id.clone()).collect();
-                        this.rows.extend(
-                            page.messages
-                                .into_iter()
-                                .filter(|m| !known.contains(&m.id))
-                                .map(|message| Row { account: ix, message }),
-                        );
-                        if let Some(link) = page.next_link {
-                            this.next.push((ix, link));
-                        }
+                for (ix, link, page) in result.unwrap_or_default() {
+                    // not there this time: the list asks again when it is scrolled to its end
+                    let Ok(page) = page else {
+                        this.next.push((ix, link));
+                        continue;
+                    };
+                    let known: HashSet<String> = this.rows.iter().map(|r| r.message.id.clone()).collect();
+                    this.rows.extend(
+                        page.messages.into_iter().filter(|m| !known.contains(&m.id)).map(|message| Row { account: ix, message }),
+                    );
+                    if let Some(link) = page.next_link {
+                        this.next.push((ix, link));
                     }
                 }
             },
@@ -614,8 +677,14 @@ impl MailApp {
             let mut reader = EventReader::new();
             loop {
                 cx.background_executor().timer(Duration::from_millis(800)).await;
-                let events = reader.poll();
-                if !events.is_empty() && this.update_in(cx, |this, window, cx| this.on_events(events, window, cx)).is_err() {
+                let (events, notices) = (reader.poll(), crate::composer::take_notices());
+                let told = this.update_in(cx, |this, window, cx| {
+                    this.on_notices(notices, window, cx);
+                    if !events.is_empty() {
+                        this.on_events(events, window, cx);
+                    }
+                });
+                if told.is_err() {
                     break;
                 }
                 if this.upgrade().is_none() {
@@ -659,24 +728,32 @@ impl MailApp {
         .detach();
     }
 
+    /// What became of mail whose composer is gone, or was sent.
+    fn on_notices(&mut self, notices: Vec<Notice>, window: &mut Window, cx: &mut Context<Self>) {
+        for notice in notices {
+            let note = match notice {
+                Notice::Sent { recipients } => {
+                    let text = if i18n::german() { format!("An {recipients}") } else { format!("To {recipients}") };
+                    Notification::success(text).title(tr!("Sent", "Gesendet"))
+                }
+                // these stay until they are read
+                Notice::NotSent(error) => Notification::error(error).title(tr!("Not sent", "Nicht gesendet")).autohide(false),
+                Notice::NotSaved(error) => {
+                    Notification::error(error).title(tr!("Draft not saved", "Entwurf nicht gespeichert")).autohide(false)
+                }
+            };
+            window.push_notification(note, cx);
+        }
+    }
+
     fn on_events(&mut self, events: Vec<Event>, window: &mut Window, cx: &mut Context<Self>) {
-        let mut refresh = false;
+        // several changes of one account: its folders and the list once
+        let mut changed: Vec<usize> = Vec::new();
         for event in events {
             match event {
                 Event::Changed { account, .. } => {
-                    let ix = self.accounts.iter().position(|a| a.config.id == account);
-                    let affects = match (&self.view, ix) {
-                        (Some(View::Pinned), Some(_)) => true,
-                        (Some(View::Folder { account, .. } | View::Search { account, .. }), Some(ix)) => *account == ix,
-                        _ => false,
-                    };
-                    refresh |= affects;
-                    if let Some(ix) = ix {
-                        self.load_folders(ix, window, cx);
-                        // an answer drafted through jm shows up below the open mail
-                        if matches!(&self.pane, Pane::Reader(o) if o.account == ix) {
-                            self.load_thread(window, cx);
-                        }
+                    if let Some(ix) = self.accounts.iter().position(|a| a.config.id == account).filter(|ix| !changed.contains(ix)) {
+                        changed.push(ix);
                     }
                 }
                 Event::Open { account, id } => {
@@ -686,6 +763,24 @@ impl MailApp {
                         self.open_message(ix, id, window, cx);
                     }
                 }
+            }
+        }
+        let mut refresh = false;
+        for ix in changed {
+            refresh |= match &self.view {
+                Some(View::Pinned) => true,
+                Some(View::Folder { account, .. } | View::Search { account, .. }) => *account == ix,
+                None => false,
+            };
+            self.load_folders(ix, window, cx);
+            match &self.pane {
+                // an answer drafted through jm shows up below the open mail
+                Pane::Reader(opened) if opened.account == ix => self.load_thread(window, cx),
+                // and a draft jm changed shows what it says now
+                Pane::Composer(composer) if composer.read(cx).account() == ix => {
+                    composer.clone().update(cx, |c, cx| c.refresh(window, cx));
+                }
+                _ => {}
             }
         }
         if refresh {
@@ -729,7 +824,7 @@ impl MailApp {
     pub fn open_message(&mut self, account: usize, id: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(mailbox) = self.accounts.get(account).map(|a| a.mailbox.clone()) else { return };
         self.selected = Some(id.clone());
-        self.pane = Pane::Loading;
+        self.set_pane(Pane::Loading);
         let remote = self.config.load_remote_images;
         let wanted = id.clone();
         self.run(
@@ -747,17 +842,23 @@ impl MailApp {
             },
             move |this, result, window, cx| {
                 if this.selected.as_deref() != Some(wanted.as_str()) {
+                    // its row is gone (unpinned in Pinned, say) and nothing else was opened
+                    if this.selected.is_none() && matches!(this.pane, Pane::Loading) {
+                        this.set_pane(Pane::Empty);
+                    }
                     return;
                 }
+                let read_only = this.accounts.get(account).is_none_or(|a| a.config.read_only);
                 match result {
                     Ok((message, attachments)) => {
-                        if message.is_draft {
+                        // a draft opens in the editor, where it can be edited at all
+                        if message.is_draft && !read_only {
                             this.open_draft(account, message.id.clone(), window, cx);
                             return;
                         }
                         let unread = !message.is_read;
                         let opened = reader_state(account, message, attachments, remote);
-                        this.pane = Pane::Reader(Box::new(opened));
+                        this.set_pane(Pane::Reader(Box::new(opened)));
                         if unread {
                             this.mark_read(true, window, cx);
                         }
@@ -765,7 +866,7 @@ impl MailApp {
                         this.load_thread(window, cx);
                     }
                     Err(e) => {
-                        this.pane = Pane::Empty;
+                        this.set_pane(Pane::Empty);
                         this.notify_error(tr!("Could not open the mail", "E-Mail konnte nicht geöffnet werden"), &e, window, cx);
                     }
                 }
@@ -836,18 +937,32 @@ impl MailApp {
         );
     }
 
-    /// Show a draft in the editor.
+    /// Show a draft in the editor (it stays as it is if the editor shows it already).
     pub fn open_draft(&mut self, account: usize, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let open = matches!(&self.pane, Pane::Composer(c) if c.read(cx).account() == account && c.read(cx).draft_id() == Some(id.as_str()));
+        if !open {
+            self.load_draft(account, id, window, cx);
+        }
+    }
+
+    /// Fetch a draft into a new editor.
+    fn load_draft(&mut self, account: usize, id: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(acc) = self.accounts.get(account) else { return };
+        if acc.config.read_only {
+            // nothing of it could be saved: it shows like any mail
+            self.open_message(account, id, window, cx);
+            return;
+        }
         let composer = cx.new(|cx| Composer::existing(account, acc.mailbox.clone(), self.mail_view.clone(), id, window, cx));
         self.set_composer(composer, window, cx);
     }
 
     fn set_composer(&mut self, composer: Entity<Composer>, window: &mut Window, cx: &mut Context<Self>) {
-        self._subscriptions.push(cx.subscribe_in(&composer, window, |this, _, ev: &ComposerEvent, window, cx| {
+        let subscription = cx.subscribe_in(&composer, window, |this, _, ev: &ComposerEvent, window, cx| {
             this.on_composer_event(ev, window, cx)
-        }));
-        self.pane = Pane::Composer(composer);
+        });
+        self.set_pane(Pane::Composer(composer));
+        self.pane_subscription = Some(subscription);
         cx.notify();
     }
 
@@ -862,20 +977,23 @@ impl MailApp {
                 }
                 self.selected = Some(message.id.clone());
             }
-            ComposerEvent::Sent { account, id, recipients } => {
+            // that it was sent, and to whom, comes as a notice (see `on_notices`)
+            ComposerEvent::Sent { id } => {
                 self.drop_row(id);
-                self.pane = Pane::Empty;
-                let text = if i18n::german() { format!("An {recipients}") } else { format!("To {recipients}") };
-                window.push_notification(Notification::success(text).title(tr!("Sent", "Gesendet")), cx);
-                self.load_folders(*account, window, cx);
+                self.set_pane(Pane::Empty);
                 self.focus_list(window, cx);
             }
             ComposerEvent::Discarded { account, id } => {
                 if let Some(id) = id {
                     self.drop_row(id);
                 }
-                self.pane = Pane::Empty;
-                self.load_folders(*account, window, cx);
+                self.set_pane(Pane::Empty);
+                self.load_folders_soon(*account, window, cx);
+                self.focus_list(window, cx);
+            }
+            ComposerEvent::Failed { error } => {
+                self.set_pane(Pane::Empty);
+                self.notify_error(tr!("Could not open the draft", "Entwurf konnte nicht geöffnet werden"), error, window, cx);
                 self.focus_list(window, cx);
             }
         }
@@ -969,7 +1087,7 @@ impl MailApp {
         let work_id = id.clone();
         self.run(window, cx, move || mailbox.set_read(&work_id, read), move |this, result, window, cx| {
             match result {
-                Ok(_) => this.load_folders(account, window, cx),
+                Ok(_) => this.load_folders_soon(account, window, cx),
                 Err(e) => {
                     this.edit_message(&id, |m| m.is_read = !read);
                     this.notify_error(tr!("Could not mark the mail", "E-Mail nicht markiert"), &e, window, cx);
@@ -1008,41 +1126,46 @@ impl MailApp {
         // move on to the next mail only when the one filed away was the selected one
         let was_selected = self.selected.as_deref() == Some(id.as_str());
         let removed = self.drop_row(&id);
-        if was_selected && matches!(self.pane, Pane::Reader(_) | Pane::Composer(_)) {
-            self.pane = Pane::Empty;
+        self.filing.insert(id.clone());
+        if was_selected && matches!(self.pane, Pane::Reader(_) | Pane::Composer(_) | Pane::Loading) {
+            self.set_pane(Pane::Empty);
         }
         if let Some(ix) = ix.filter(|_| was_selected && !self.rows.is_empty()) {
             self.select_index(ix.min(self.rows.len() - 1), window, cx);
         }
         let mailbox = self.accounts[account].mailbox.clone();
         let is_draft = message.is_draft;
+        let (work_id, view) = (id.clone(), self.view.clone());
         self.run(
             window,
             cx,
             move || {
                 if is_draft {
-                    return mailbox.delete_draft(&id);
+                    return mailbox.delete_draft(&work_id);
                 }
                 match to {
-                    FileTo::Archive => mailbox.archive(&id),
-                    FileTo::Trash => mailbox.trash(&id),
-                    FileTo::Inbox => mailbox.move_to(&id, "inbox"),
+                    FileTo::Archive => mailbox.archive(&work_id),
+                    FileTo::Trash => mailbox.trash(&work_id),
+                    FileTo::Inbox => mailbox.move_to(&work_id, "inbox"),
                 }
                 .map(|_| ())
             },
-            move |this, result, window, cx| match result {
-                Ok(()) => this.load_folders(account, window, cx),
-                Err(e) => {
-                    if let (Some(row), Some(ix)) = (removed, ix) {
-                        this.rows.insert(ix.min(this.rows.len()), row);
-                    }
-                    let title = match to {
-                        FileTo::Archive => tr!("Could not archive", "Archivieren fehlgeschlagen"),
-                        FileTo::Trash => tr!("Could not delete", "Löschen fehlgeschlagen"),
-                        FileTo::Inbox => tr!("Could not move it to the inbox", "Nicht in den Posteingang verschoben"),
-                    };
-                    this.notify_error(title, &e, window, cx);
+            move |this, result, window, cx| {
+                this.filing.remove(&id);
+                let Err(e) = result else {
+                    this.load_folders_soon(account, window, cx);
+                    return;
+                };
+                // back into the list it came from, if that is still the one on the screen
+                if let (Some(row), Some(ix)) = (removed.filter(|_| this.view == view), ix) {
+                    this.rows.insert(ix.min(this.rows.len()), row);
                 }
+                let title = match to {
+                    FileTo::Archive => tr!("Could not archive", "Archivieren fehlgeschlagen"),
+                    FileTo::Trash => tr!("Could not delete", "Löschen fehlgeschlagen"),
+                    FileTo::Inbox => tr!("Could not move it to the inbox", "Nicht in den Posteingang verschoben"),
+                };
+                this.notify_error(title, &e, window, cx);
             },
         );
         cx.notify();
@@ -1063,12 +1186,18 @@ impl MailApp {
     /// Reply (`all`), or forward when `forward` is set.
     pub fn answer(&mut self, all: bool, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some((account, message)) = self.target() else { return };
-        if message.is_draft || !self.writable(account, window, cx) {
+        // one at a time: `r` typed twice is one reply
+        if self.answering.is_some() || message.is_draft || !self.writable(account, window, cx) {
             return;
         }
         let mailbox = self.accounts[account].mailbox.clone();
         let id = message.id.clone();
-        self.pane = Pane::Loading;
+        self.set_pane(Pane::Loading);
+        self.answers += 1;
+        let wanted = self.answers;
+        self.answering = Some(wanted);
+        // what is typed until the editor is there must not archive mail (`e`) or reply to all (`a`)
+        self.wait_focus.focus(window, cx);
         self.run(
             window,
             cx,
@@ -1079,16 +1208,23 @@ impl MailApp {
                     mailbox.create_reply(&id, all, "", true)
                 }
             },
-            move |this, result, window, cx| match result {
-                Ok(draft) => {
-                    let mailbox = this.accounts[account].mailbox.clone();
-                    let composer = cx.new(|cx| Composer::loaded(account, mailbox, this.mail_view.clone(), draft, window, cx));
-                    this.selected = None;
-                    this.set_composer(composer, window, cx);
+            move |this, result, window, cx| {
+                // something else was opened meanwhile: the draft waits in Drafts
+                if this.answering != Some(wanted) {
+                    return;
                 }
-                Err(e) => {
-                    this.pane = Pane::Empty;
-                    this.notify_error(tr!("Could not create the draft", "Entwurf nicht angelegt"), &e, window, cx);
+                match (result, this.accounts.get(account).map(|a| a.mailbox.clone())) {
+                    (Ok(draft), Some(mailbox)) => {
+                        let composer = cx.new(|cx| Composer::loaded(account, mailbox, this.mail_view.clone(), draft, window, cx));
+                        this.selected = None;
+                        this.set_composer(composer, window, cx);
+                    }
+                    (Ok(_), None) => this.set_pane(Pane::Empty),
+                    (Err(e), _) => {
+                        this.set_pane(Pane::Empty);
+                        this.focus_list(window, cx);
+                        this.notify_error(tr!("Could not create the draft", "Entwurf nicht angelegt"), &e, window, cx);
+                    }
                 }
             },
         );
@@ -1114,8 +1250,9 @@ impl MailApp {
 
     pub fn copy_id(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((account, message)) = self.target() else { return };
+        let Some(owner) = self.accounts.get(account) else { return };
         let short = ids::short(&message.id);
-        ids::remember(&self.accounts[account].config.id, [message.id.as_str()]);
+        ids::remember(&owner.config.id, [message.id.as_str()]);
         cx.write_to_clipboard(ClipboardItem::new_string(short.clone()));
         let text = if i18n::german() {
             format!("{short} kopiert: `jm show {short}`")
@@ -1134,7 +1271,7 @@ impl MailApp {
 
     pub fn download(&mut self, attachment: Attachment, window: &mut Window, cx: &mut Context<Self>) {
         let Pane::Reader(opened) = &self.pane else { return };
-        let mailbox = self.accounts[opened.account].mailbox.clone();
+        let Some(mailbox) = self.accounts.get(opened.account).map(|a| a.mailbox.clone()) else { return };
         let message_id = opened.message.id.clone();
         self.run(
             window,
@@ -1212,6 +1349,6 @@ impl Render for MailApp {
             .on_action(cx.listener(|this, _: &SelectPrev, w, cx| this.select_offset(-1, w, cx)))
             .child(sidebar)
             .child(list)
-            .child(v_flex().flex_1().min_w_0().h_full().bg(theme.background).child(pane))
+            .child(v_flex().flex_1().min_w_0().h_full().bg(theme.background).track_focus(&self.wait_focus).child(pane))
     }
 }

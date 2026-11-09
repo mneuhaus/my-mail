@@ -350,6 +350,21 @@ test("what is inserted goes where the cursor was, also while a menu's field has 
   has(await e.html(), '<div id="a">eins<b>!</b></div>');
 });
 
+test("a draft from elsewhere cannot act on the page: what could is taken out, and that is saved", '<style>#bar{display:none}</style><div id=a style="position:fixed;top:0;color:red">Text <img name=execCommand alt=x><span style="display:none">verborgen</span></div><form><input name=body></form><div id=signature>meins</div>', async (e) => {
+  assert.equal(await e.html(), '<div id="a" style="top: 0px; color: red;">Text <img alt="x" style="max-width: 100%; height: auto;"><span>verborgen</span></div><div id="signature">meins</div>');
+  assert.equal(await e.page.isVisible("#bar"), true);
+  // the page's own signature is still the page's
+  assert.equal(await e.page.evaluate(() => !!document.querySelectorAll("#signature")[1].shadowRoot), true);
+  await e.caret("#a");
+  await e.press("Meta+b");
+  await e.type("fett");
+  has(await e.html(), "<b>fett</b>");
+  // taken back, the text is what came, not less
+  await e.press("Meta+z");
+  await e.press("Meta+z");
+  has(await e.html(), "<style>#bar{display:none}</style>");
+});
+
 test("the dark page keeps the author's colors and nothing else", '<div>ein <font color="#d93025" id=r>rotes</font> <span id=m style="background-color:#fff27a">markiertes</span> <span id=o style="color:#000;background:#fff">fremdes</span></div><table><tr><th id=h style="background-color:#f3f3f3">K</th></tr></table>', async (e) => {
   const color = (id, what) => e.page.evaluate(([id, what]) => getComputedStyle(document.getElementById(id))[what], [id, what]);
   assert.equal(await color("r", "color"), "rgb(217, 48, 37)");

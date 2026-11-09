@@ -6,7 +6,7 @@ use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable};
+use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use jm_core::auth::{self, DeviceCode, Ms365Login};
@@ -274,6 +274,33 @@ impl Setup {
         cx.notify();
     }
 
+    /// Ask first: the sign-in goes with the account.
+    fn ask_to_remove(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        let email = self.config.accounts.iter().find(|a| a.id == id).map(|a| a.email.clone()).unwrap_or_else(|| id.clone());
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (this, id) = (this.clone(), id.clone());
+            let title = if crate::i18n::german() {
+                format!("{email} aus Just Mail entfernen?")
+            } else {
+                format!("Remove {email} from Just Mail?")
+            };
+            alert
+                .title(title)
+                .description(tr!(
+                    "Its sign-in on this Mac is deleted. The mail stays where it is, at Microsoft.",
+                    "Die Anmeldung auf diesem Mac wird gelöscht. Die E-Mails bleiben, wo sie sind: bei Microsoft."
+                ))
+                .show_cancel(true)
+                .ok_text(tr!("Remove", "Entfernen"))
+                .cancel_text(tr!("Cancel", "Abbrechen"))
+                .on_ok(move |_, window, cx| {
+                    let _ = this.update(cx, |setup, cx| setup.remove(id.clone(), window, cx));
+                    true
+                })
+        });
+    }
+
     fn remove(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         let Ok(mut config) = Config::load() else { return };
         config.accounts.retain(|a| a.id != id);
@@ -342,7 +369,7 @@ impl Render for Setup {
                                     .ghost()
                                     .xsmall()
                                     .tooltip(tr!("Remove account from Just Mail", "Konto aus Just Mail entfernen"))
-                                    .on_click(cx.listener(move |this, _, w, cx| this.remove(remove_id.clone(), w, cx))),
+                                    .on_click(cx.listener(move |this, _, w, cx| this.ask_to_remove(remove_id.clone(), w, cx))),
                             ),
                     )
                     .when_some(self.previews.iter().find(|(id, _, _)| id == &account.id), |d, (_, new, reply)| {

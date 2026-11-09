@@ -10,7 +10,12 @@
 //! Whatever changes the draft on the server goes one after the other, a save, then the uploads
 //! (`saving`, `attaching`, and `DRAFT_WRITES` across composers): Graph refuses changes to one
 //! message that overlap. A composer that goes away, because another mail was opened or the app
-//! quits, still saves what was typed since the last save (`save_last_edits`).
+//! quits, still saves what was typed since the last save and sends what it was asked to send
+//! (`finish_elsewhere`).
+//!
+//! What goes out is what the window showed: before sending, the draft on the server is compared
+//! with what the composer last got from it (`send_as_shown`). `jm` and other programs may change
+//! a draft at any time, but an agent only prepares mail; a person sends it.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
@@ -34,10 +39,32 @@ use crate::sidebar::TOP_H;
 use crate::{picture, theme, tr, util};
 
 const AUTOSAVE: Duration = Duration::from_secs(2);
-/// How long Send waits for the page to report the last keystrokes before it goes on anyway.
-const FLUSH_WAIT: Duration = Duration::from_millis(800);
-/// How long quitting waits for the last words to be saved.
+/// How long Send waits for the page to report the last keystrokes. Without an answer nothing
+/// is sent: the page may hold words the app never saw.
+const FLUSH_WAIT: Duration = Duration::from_secs(3);
+/// How long quitting waits for the last words to be saved (and a mail to be sent).
 const QUIT_WAIT: Duration = Duration::from_secs(5);
+/// A save that failed is tried again after this long.
+const RETRY: Duration = Duration::from_secs(15);
+
+/// What happened to a mail after its composer's window was gone, or on a thread of its own: the
+/// app shows these (see [`take_notices`]).
+pub enum Notice {
+    Sent { recipients: String },
+    NotSent(String),
+    NotSaved(String),
+}
+
+static NOTICES: Mutex<Vec<Notice>> = Mutex::new(Vec::new());
+
+fn notice(notice: Notice) {
+    NOTICES.lock().unwrap_or_else(PoisonError::into_inner).push(notice);
+}
+
+/// The notices since the last call.
+pub fn take_notices() -> Vec<Notice> {
+    std::mem::take(&mut *NOTICES.lock().unwrap_or_else(PoisonError::into_inner))
+}
 
 /// One change to a draft at a time, also across composers: a draft opened again must not be read
 /// before the composer that just left it has saved its last words.
@@ -59,6 +86,59 @@ fn write_draft(mailbox: &Mailbox, known: &Mutex<Option<String>>, input: &DraftIn
     };
     *known.lock().unwrap_or_else(PoisonError::into_inner) = Some(message.id.clone());
     Ok(message)
+}
+
+/// Whether two states of a draft say the same mail: text, subject and recipients.
+fn same_draft(a: &Message, b: &Message) -> bool {
+    let body = |m: &Message| m.body.as_ref().map(|b| b.content.clone());
+    let people = |list: &[Recipient]| list.iter().map(|r| r.address.to_lowercase()).collect::<Vec<_>>();
+    a.subject == b.subject
+        && body(a) == body(b)
+        && people(&a.to_recipients) == people(&b.to_recipients)
+        && people(&a.cc_recipients) == people(&b.cc_recipients)
+        && people(&a.bcc_recipients) == people(&b.bcc_recipients)
+}
+
+/// The files of a draft (not the pictures of its text) by name and size, to compare two lists.
+fn files_of(attachments: &[Attachment]) -> Vec<(String, u64)> {
+    let mut files: Vec<_> = attachments.iter().filter(|a| !a.is_inline).map(|a| (a.name.clone(), a.size)).collect();
+    files.sort();
+    files
+}
+
+/// How a send ended.
+enum Sent {
+    Yes,
+    /// Not sent: the draft on the server is not what the window showed. This is what it says.
+    Changed(Box<Message>),
+}
+
+/// Send the draft, if it still is what the composer showed: `shown` as the server gave it last,
+/// with the files `attached` (`None`: the composer does not know them all).
+fn send_as_shown(mailbox: &Mailbox, shown: &Message, attached: Option<&[Attachment]>) -> jm_core::Result<Sent> {
+    let _turn = turn();
+    let now = mailbox.message(&shown.id)?;
+    let mut same = same_draft(&now, shown);
+    if let Some(attached) = attached.filter(|_| same) {
+        same = files_of(&mailbox.attachments(&shown.id)?) == files_of(attached);
+    }
+    if !same {
+        return Ok(Sent::Changed(Box::new(now)));
+    }
+    mailbox.drop_unused_images(&shown.id)?;
+    mailbox.send_draft(&shown.id)?;
+    let recipients = shown.to_recipients.iter().chain(&shown.cc_recipients).map(|r| r.display().to_string()).collect::<Vec<_>>();
+    notice(Notice::Sent { recipients: recipients.join(", ") });
+    // lists and counts follow, whoever still looks
+    jm_core::events::emit(&jm_core::events::Event::Changed { account: mailbox.id().to_string(), folder: Some("sentitems".into()) });
+    Ok(Sent::Yes)
+}
+
+fn changed_elsewhere() -> &'static str {
+    tr!(
+        "Not sent: this draft was changed outside this window (by jm or another program).",
+        "Nicht gesendet: Dieser Entwurf wurde außerhalb dieses Fensters geändert (durch jm oder ein anderes Programm)."
+    )
 }
 
 /// On its way into the draft: it waits for the draft to exist.
@@ -87,8 +167,10 @@ impl Upload {
 
 pub enum ComposerEvent {
     Saved { account: usize, message: Box<Message> },
-    Sent { account: usize, id: String, recipients: String },
+    Sent { id: String },
     Discarded { account: usize, id: Option<String> },
+    /// The draft could not be opened.
+    Failed { error: jm_core::Error },
 }
 
 impl EventEmitter<ComposerEvent> for Composer {}
@@ -110,6 +192,8 @@ pub struct Composer {
     subject: Entity<InputState>,
     show_cc: bool,
     attachments: Vec<Attachment>,
+    /// `attachments` is all the draft has (a draft that was opened tells them a moment later).
+    attachments_known: bool,
     /// The web view the text is edited in (`None`: WebKit could not start).
     view: Option<MailView>,
     /// This composer's editor page (see `editor::next_page`), whether it is dark, and whether its
@@ -141,6 +225,8 @@ pub struct Composer {
     quote: Option<String>,
     dirty: bool,
     saving: bool,
+    /// `error` is about a save that failed (the next one that works takes it away).
+    save_failed: bool,
     sending: bool,
     /// Send once the page reported its last keystrokes.
     send_after_flush: bool,
@@ -149,8 +235,10 @@ pub struct Composer {
     /// Bumped on every edit; autosave only fires for the latest one.
     edits: u64,
     error: Option<String>,
-    /// Keeps the web view hidden while recipient suggestions hang over it.
+    /// Keeps the web view hidden while recipient suggestions hang over it, and while the
+    /// question whether to delete the draft does.
     cover: Option<Cover>,
+    asking: Option<Cover>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -182,15 +270,16 @@ impl Composer {
         }
         // ↩ in the subject goes on to the text
         subscriptions.push(cx.subscribe_in(&subject, window, |this, _, ev: &InputEvent, window, cx| {
-            if matches!(ev, InputEvent::PressEnter { .. }) {
+            // (⌘↩ sends)
+            if matches!(ev, InputEvent::PressEnter { secondary: false, .. }) {
                 this.focus_text(window, cx);
             }
         }));
-        // going away must not cost the last words: quitting waits for them
-        subscriptions.push(cx.on_release(|this, cx| drop(this.save_last_edits(cx))));
+        // going away must not cost the last words or a mail that was to be sent: quitting waits
+        subscriptions.push(cx.on_release(|this, cx| drop(this.finish_elsewhere(cx))));
         subscriptions.push(cx.on_app_quit(|this, cx| {
-            if let Some(saved) = this.save_last_edits(cx) {
-                let _ = saved.recv_timeout(QUIT_WAIT);
+            if let Some(done) = this.finish_elsewhere(cx) {
+                let _ = done.recv_timeout(QUIT_WAIT);
             }
             async {}
         }));
@@ -212,6 +301,7 @@ impl Composer {
             subject,
             show_cc: false,
             attachments: Vec::new(),
+            attachments_known: true,
             view,
             page: editor::next_page(),
             page_dark: None,
@@ -229,12 +319,14 @@ impl Composer {
             quote: None,
             dirty: false,
             saving: false,
+            save_failed: false,
             sending: false,
             send_after_flush: false,
             send_after_save: false,
             edits: 0,
             error: None,
             cover: None,
+            asking: None,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
@@ -280,10 +372,54 @@ impl Composer {
             this.loading = false;
             match result {
                 Ok(message) => this.fill(message, window, cx),
-                Err(e) => this.error = Some(e.to_string()),
+                // no editor for a draft that is not there: typing would make a new one
+                Err(error) => {
+                    this.gone = true;
+                    cx.emit(ComposerEvent::Failed { error });
+                }
             }
         });
         this
+    }
+
+    /// Which of the app's accounts it writes for.
+    pub fn account(&self) -> usize {
+        self.account
+    }
+
+    /// The id of the draft, once it is saved.
+    pub fn draft_id(&self) -> Option<&str> {
+        self.draft.as_ref().map(|d| d.id.as_str())
+    }
+
+    /// A send was asked for and is not out yet.
+    fn send_pending(&self) -> bool {
+        self.send_after_flush || self.send_after_save
+    }
+
+    /// Something else changed mail of this account (`jm`, say): if it was this draft, the window
+    /// shows what it says now. Not while anything of the composer is on its way: then the
+    /// composer's word counts.
+    pub fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(shown) = self.draft.clone().filter(|_| self.reloadable().is_some() && !self.send_pending()) else { return };
+        let mailbox = self.mailbox.clone();
+        let fetch = move || {
+            let _turn = turn();
+            let now = mailbox.message(&shown.id)?;
+            let files = if now.has_attachments { mailbox.attachments(&shown.id)? } else { Vec::new() };
+            Ok((same_draft(&now, &shown), now, files))
+        };
+        self.run(window, cx, fetch, |this, result, window, cx| {
+            let Ok((same, now, files)) = result else { return };
+            if this.reloadable().is_none() || this.send_pending() {
+                return;
+            }
+            if same {
+                this.attachments = files.into_iter().filter(|a| !a.is_inline).collect();
+            } else {
+                this.fill(now, window, cx);
+            }
+        });
     }
 
     /// A draft that was just created (reply, forward).
@@ -362,12 +498,15 @@ impl Composer {
         self.cc.update(cx, |f, cx| f.set(&message.cc_recipients, window, cx));
         self.bcc.update(cx, |f, cx| f.set(&message.bcc_recipients, window, cx));
         self.subject.update(cx, |s, cx| s.set_value(subject, window, cx));
+        self.attachments.clear();
+        self.attachments_known = !message.has_attachments;
         if message.has_attachments {
             let mailbox = self.mailbox.clone();
             let id = message.id.clone();
             self.run(window, cx, move || mailbox.attachments(&id), |this, result, _, _| {
                 if let Ok(list) = result {
                     this.attachments = list.into_iter().filter(|a| !a.is_inline).collect();
+                    this.attachments_known = true;
                 }
             });
         }
@@ -377,6 +516,12 @@ impl Composer {
             self.changed(window, cx);
         }
         self.upload_waiting(window, cx);
+        self.load_page(cx);
+        cx.notify();
+    }
+
+    /// The page is gone (see `WebMessage::Ended`): again, with what was typed so far.
+    pub fn reload_page(&mut self, cx: &mut Context<Self>) {
         self.load_page(cx);
         cx.notify();
     }
@@ -488,43 +633,91 @@ impl Composer {
         Ok(out)
     }
 
-    /// The draft as it is to be saved; `None` for a new mail with nothing worth a draft yet.
-    /// With `strict` an invalid address is an error instead of skipped.
-    fn draft_input(&self, cx: &App, strict: bool) -> Result<Option<DraftInput>, String> {
+    /// The draft as it is to be saved; `None` for a new mail with nothing worth a draft yet
+    /// (a mail that is to be sent always is). With `strict` an invalid address is an error
+    /// instead of skipped.
+    fn draft_input(&self, cx: &App, strict: bool, to_send: bool) -> Result<Option<DraftInput>, String> {
         let [to, cc, bcc] = self.recipients(cx, strict)?;
         let subject = Self::value(&self.subject, cx);
         let is_new = self.draft.is_none();
         let no_text = html::html_to_text(&self.body_html).trim().is_empty() && html::content_ids(&self.body_html).is_empty();
-        if is_new && no_text && subject.is_empty() && to.as_ref().is_none_or(|t| t.is_empty()) && self.waiting.is_empty() {
+        let nothing = no_text && subject.is_empty() && to.as_ref().is_none_or(|t| t.is_empty()) && self.waiting.is_empty();
+        if is_new && nothing && !to_send {
             return Ok(None);
         }
         let body_html = (is_new || self.body_html != self.saved_html).then(|| self.body_html.clone());
         Ok(Some(DraftInput { to, cc, bcc, subject: Some(subject), body_html, importance: None }))
     }
 
+    /// Whether the mail can go out: every address is one, there is at least one, and the mail
+    /// says something (⌘↩ is quickly pressed in a mail that was only just begun).
+    fn ready_to_send(&self, cx: &App) -> Result<(), String> {
+        let lists = self.recipients(cx, true)?;
+        if lists.iter().all(|list| list.as_ref().is_none_or(|l| l.is_empty())) {
+            return Err(tr!("Add at least one recipient.", "Mindestens einen Empfänger eintragen.").into());
+        }
+        let no_text = html::html_to_text(&self.body_html).trim().is_empty() && html::content_ids(&self.body_html).is_empty();
+        let no_files = self.attachments.is_empty() && self.waiting.is_empty() && self.uploading == 0;
+        if no_text && no_files && Self::value(&self.subject, cx).is_empty() {
+            return Err(tr!("Nothing to send yet: no subject, no text, no file.", "Noch nichts zu senden: kein Betreff, kein Text, keine Datei.").into());
+        }
+        Ok(())
+    }
+
     /// The composer goes away (another mail was opened, the app quits): what was typed since
-    /// the last save, and what still waits to go into the draft, goes there on a thread of its
-    /// own. The receiver hears when that is done; `None` if there is nothing to save.
-    fn save_last_edits(&mut self, cx: &App) -> Option<mpsc::Receiver<()>> {
-        if self.gone || self.loading || (!self.dirty && self.waiting.is_empty()) {
+    /// the last save and what still waits to go into the draft goes there, and a mail that was
+    /// to be sent is sent, on a thread of its own. The receiver hears when that is done; `None`
+    /// if there is nothing to do.
+    fn finish_elsewhere(&mut self, cx: &App) -> Option<mpsc::Receiver<()>> {
+        if self.gone || self.loading {
             return None;
         }
-        let input = self.draft_input(cx, false).ok().flatten()?;
-        self.dirty = false;
+        let mut send = self.send_pending();
+        if send && let Err(e) = self.ready_to_send(cx) {
+            notice(Notice::NotSent(e));
+            send = false;
+        }
+        let unsaved = self.dirty || !self.waiting.is_empty() || (send && self.draft.is_none());
+        let input = if unsaved { self.draft_input(cx, false, send).ok().flatten() } else { None };
+        if input.is_none() && !send {
+            return None;
+        }
+        (self.dirty, self.send_after_flush, self.send_after_save) = (false, false, false);
         let uploads = std::mem::take(&mut self.waiting);
-        let (mailbox, known) = (self.mailbox.clone(), self.known.clone());
+        // while files are still going up, the composer does not know all the draft has
+        let mut attached = (self.attachments_known && !self.attaching).then(|| self.attachments.clone());
+        let (mailbox, known, shown) = (self.mailbox.clone(), self.known.clone(), self.draft.clone());
         let (done, heard) = mpsc::channel();
         std::thread::spawn(move || {
-            if let Ok(draft) = write_draft(&mailbox, &known, &input) {
-                let _turn = turn();
-                for upload in uploads {
-                    let _ = upload.send(&mailbox, &draft.id);
+            let saved = match &input {
+                Some(input) => write_draft(&mailbox, &known, input).map(Some),
+                None => Ok(shown),
+            };
+            match saved {
+                Ok(Some(draft)) => {
+                    {
+                        let _turn = turn();
+                        for upload in uploads {
+                            if let ((_, _, Ok(Some(file))), Some(attached)) = (upload.send(&mailbox, &draft.id), &mut attached) {
+                                attached.push(file);
+                            }
+                        }
+                    }
+                    // the list shows what the draft says now
+                    jm_core::events::emit(&jm_core::events::Event::Changed {
+                        account: mailbox.id().to_string(),
+                        folder: Some("drafts".into()),
+                    });
+                    if send {
+                        match send_as_shown(&mailbox, &draft, attached.as_deref()) {
+                            Ok(Sent::Yes) => {}
+                            Ok(Sent::Changed(_)) => notice(Notice::NotSent(changed_elsewhere().into())),
+                            Err(e) => notice(Notice::NotSent(e.to_string())),
+                        }
+                    }
                 }
-                // the list shows what the draft says now
-                jm_core::events::emit(&jm_core::events::Event::Changed {
-                    account: mailbox.id().to_string(),
-                    folder: Some("drafts".into()),
-                });
+                Ok(None) => {}
+                Err(e) => notice(Notice::NotSaved(e.to_string())),
             }
             let _ = done.send(());
         });
@@ -536,7 +729,7 @@ impl Composer {
         if self.saving || self.attaching || self.loading {
             return; // its turn comes (see `settle`)
         }
-        let input = match self.draft_input(cx, explicit) {
+        let input = match self.draft_input(cx, explicit, self.send_after_save) {
             Ok(Some(input)) => input,
             Ok(None) => return, // nothing worth a draft yet
             Err(e) => {
@@ -548,7 +741,6 @@ impl Composer {
         };
         let body_html = self.body_html.clone();
         self.saving = true;
-        self.error = None;
         let edits = self.edits;
         let (mailbox, known) = (self.mailbox.clone(), self.known.clone());
         cx.notify();
@@ -566,39 +758,68 @@ impl Composer {
                         }
                         this.has_markers = html::author_html(message.body.as_ref().map_or("", |b| &b.content)).is_some();
                         this.draft = Some(message.clone());
+                        // what else the window complains about (a mail that was not sent) stays
+                        if std::mem::take(&mut this.save_failed) {
+                            this.error = None;
+                        }
                         cx.emit(ComposerEvent::Saved { account: this.account, message: Box::new(message) });
-                        jm_core::events::emit(&jm_core::events::Event::Changed {
-                            account: this.mailbox.id().to_string(),
-                            folder: Some("drafts".into()),
-                        });
                         this.settle(window, cx);
                     }
                     Err(e) => {
                         this.send_after_save = false;
+                        this.save_failed = true;
                         this.error = Some(e.to_string());
+                        this.save_again_later(window, cx);
                     }
                 }
             },
         );
     }
 
+    /// A save failed (the network was gone, say): once more after a while, if nothing saved it
+    /// meanwhile.
+    fn save_again_later(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(RETRY).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.dirty && !this.saving && !this.sending && !this.gone {
+                    this.save(false, window, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Send right away (no confirmation), once the page reported the last keystrokes.
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.sending || self.loading || self.send_after_flush {
+        if self.sending || self.loading || self.send_pending() {
             return;
         }
         let Some(view) = &self.view else {
             self.send_checked(window, cx);
             return;
         };
+        if !self.page_ready {
+            self.error = Some(tr!("The text is not ready yet, try again in a moment.", "Der Text ist noch nicht bereit, gleich noch einmal versuchen.").into());
+            cx.notify();
+            return;
+        }
         self.send_after_flush = true;
+        self.error = None;
+        cx.notify();
         view.evaluate(&editor::call("flush", ()));
-        // a page that does not answer must not keep the mail from going out
         cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(FLUSH_WAIT).await;
-            let _ = this.update_in(cx, |this, window, cx| {
+            let _ = this.update_in(cx, |this, _, cx| {
                 if std::mem::take(&mut this.send_after_flush) {
-                    this.send_checked(window, cx);
+                    this.error = Some(
+                        tr!(
+                            "Not sent: the text does not answer. Open the draft again (⌘R).",
+                            "Nicht gesendet: Der Text antwortet nicht. Entwurf bitte neu öffnen (⌘R)."
+                        )
+                        .into(),
+                    );
+                    cx.notify();
                 }
             });
         })
@@ -610,17 +831,8 @@ impl Composer {
         if self.sending || self.loading {
             return;
         }
-        let [to, cc, bcc] = match self.recipients(cx, true) {
-            Ok(r) => r,
-            Err(e) => {
-                self.error = Some(e);
-                cx.notify();
-                return;
-            }
-        };
-        let nobody = |list: &Option<Vec<Recipient>>| list.as_ref().is_none_or(|l| l.is_empty());
-        if nobody(&to) && nobody(&cc) && nobody(&bcc) {
-            self.error = Some(tr!("Add at least one recipient.", "Mindestens einen Empfänger eintragen.").into());
+        if let Err(e) = self.ready_to_send(cx) {
+            self.error = Some(e);
             cx.notify();
             return;
         }
@@ -654,27 +866,28 @@ impl Composer {
     }
 
     fn send_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(draft) = self.draft.clone() else { return };
+        let Some(shown) = self.draft.clone() else { return };
         self.sending = true;
         let mailbox = self.mailbox.clone();
-        let id = draft.id.clone();
-        let recipients =
-            draft.to_recipients.iter().chain(&draft.cc_recipients).map(|r| r.display().to_string()).collect::<Vec<_>>().join(", ");
+        let attached = self.attachments_known.then(|| self.attachments.clone());
         cx.notify();
-        let send = move || {
-            mailbox.drop_unused_images(&id)?;
-            mailbox.send_draft(&id)
-        };
-        self.run(window, cx, send, move |this, result, _, cx| {
+        let send = move || send_as_shown(&mailbox, &shown, attached.as_deref());
+        self.run(window, cx, send, |this, result, window, cx| {
             this.sending = false;
             match result {
-                Ok(()) => {
+                Ok(Sent::Yes) => {
                     this.gone = true;
-                    jm_core::events::emit(&jm_core::events::Event::Changed {
-                        account: this.mailbox.id().to_string(),
-                        folder: Some("sentitems".into()),
-                    });
-                    cx.emit(ComposerEvent::Sent { account: this.account, id: draft.id.clone(), recipients });
+                    let id = this.draft_id().unwrap_or_default().to_string();
+                    cx.emit(ComposerEvent::Sent { id });
+                }
+                // the window shows what would go out now: to be read, then sent again
+                Ok(Sent::Changed(now)) => {
+                    this.fill(*now, window, cx);
+                    this.error = Some(format!(
+                        "{} {}",
+                        changed_elsewhere(),
+                        tr!("It now shows what it says: check it and send again.", "Er zeigt jetzt, was darin steht: bitte prüfen und erneut senden.")
+                    ));
                 }
                 Err(e) => this.error = Some(format!("{}: {e}", tr!("Not sent", "Nicht gesendet"))),
             }
@@ -683,18 +896,38 @@ impl Composer {
 
     fn discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(draft) = self.draft.clone() else {
+            self.gone = true;
+            // its first save may be on its way: then that draft goes too
+            let (mailbox, known) = (self.mailbox.clone(), self.known.clone());
+            if self.saving {
+                std::thread::spawn(move || {
+                    let _turn = turn();
+                    if let Some(id) = known.lock().unwrap_or_else(PoisonError::into_inner).clone() {
+                        let _ = mailbox.delete_draft(&id);
+                    }
+                });
+            }
             cx.emit(ComposerEvent::Discarded { account: self.account, id: None });
             return;
         };
         let this = cx.entity().downgrade();
+        // GPUI cannot draw the question over the web view
+        self.asking = self.view.as_ref().and_then(|v| v.cover(px(f32::MAX)));
         window.open_alert_dialog(cx, move |alert, _, _| {
             let this = this.clone();
+            let asked = this.clone();
             let draft = draft.clone();
             alert
                 .title(tr!("Delete this draft?", "Diesen Entwurf löschen?"))
                 .show_cancel(true)
                 .ok_text(tr!("Delete", "Löschen"))
                 .cancel_text(tr!("Cancel", "Abbrechen"))
+                .on_close(move |_, _, cx| {
+                    let _ = asked.update(cx, |c, cx| {
+                        c.asking = None;
+                        cx.notify();
+                    });
+                })
                 .on_ok(move |_, window, cx| {
                     let id = draft.id.clone();
                     let work_id = id.clone();
@@ -927,14 +1160,24 @@ impl Composer {
 
     fn remove_attachment(&mut self, attachment_id: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(draft) = &self.draft else { return };
+        let Some(at) = self.attachments.iter().position(|a| a.id == attachment_id) else { return };
+        let removed = self.attachments.remove(at);
         let mailbox = self.mailbox.clone();
         let id = draft.id.clone();
-        self.attachments.retain(|a| a.id != attachment_id);
+        // a send waits for it, like for an upload: the file must not go out after all
+        self.uploading += 1;
         cx.notify();
-        self.run(window, cx, move || mailbox.remove_attachment(&id, &attachment_id), |this, result, _, _| {
+        let remove = move || {
+            let _turn = turn();
+            mailbox.remove_attachment(&id, &attachment_id)
+        };
+        self.run(window, cx, remove, move |this, result, window, cx| {
+            this.uploading = this.uploading.saturating_sub(1);
             if let Err(e) = result {
-                this.error = Some(e.to_string());
+                this.attachments.insert(at.min(this.attachments.len()), removed);
+                this.upload_failed(e.to_string());
             }
+            this.settle(window, cx);
         });
     }
 
@@ -949,7 +1192,7 @@ impl Composer {
     }
 
     fn status(&self) -> String {
-        if self.sending {
+        if self.sending || self.send_pending() {
             tr!("Sending…", "Wird gesendet…").into()
         } else if self.saving {
             tr!("Saving…", "Speichert…").into()
@@ -992,7 +1235,7 @@ fn field(state: &Entity<InputState>) -> Input {
 impl Render for Composer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let busy = self.sending || self.loading;
+        let busy = self.sending || self.loading || self.send_pending();
         let account = self.mailbox.account.email.clone();
         // the page has the colors of the theme it was made for
         if self.page_dark.is_some_and(|dark| dark != theme.mode.is_dark()) {
@@ -1041,7 +1284,9 @@ impl Render for Composer {
                     .label("Cc/Bcc")
                     .selected(self.show_cc)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_cc = !this.show_cc;
+                        // recipients that would go along unseen keep their fields open
+                        let filled = [&this.cc, &this.bcc].iter().any(|f| !f.read(cx).input().read(cx).value().trim().is_empty());
+                        this.show_cc = !this.show_cc || filled;
                         cx.notify();
                     })),
             )

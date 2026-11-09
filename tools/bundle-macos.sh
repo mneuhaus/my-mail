@@ -31,6 +31,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSAppSleepDisabled</key><true/>
+  <!-- attachments saved to open them carry the quarantine mark, so macOS asks before it runs one -->
+  <key>LSFileQuarantineEnabled</key><true/>
 </dict>
 </plist>
 PLIST

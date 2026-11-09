@@ -8,7 +8,9 @@ an MCP server) that share the same accounts. Mail goes through Microsoft Graph o
 - **Read**: mail shows in WebKit, the way its sender designed it (columns, colors, fonts), like in
   Apple Mail or Outlook. Designed mail stays on light paper in dark mode; plain mail takes the
   app's colors. Nothing in a mail runs (a content policy allows only the app's own script), and
-  nothing is loaded from elsewhere (no tracking pixels, remote images only on request). Pictures
+  nothing is loaded from elsewhere (no tracking pixels, remote images only on request, no link
+  previews, no cookies or cache kept between mails). An attachment you open is saved with the
+  quarantine mark, so macOS asks before it runs one. Pictures
   sent along with the mail (logos in signatures) show right away; hidden preview text stays
   hidden. Below a mail comes what followed in its conversation, your own answers and drafts
   included, each with only its new part (Graph's `uniqueBody`).
@@ -37,14 +39,20 @@ an MCP server) that share the same accounts. Mail goes through Microsoft Graph o
   photo taken sideways is turned upright. Other files dropped or pasted become attachments; text
   copied from a web page or Word keeps its structure but not its fonts and colors (`⇧⌘V` pastes
   text only).
-- **Recipients are chips**: ⌫ takes out a whole recipient, a click shows its address. Typing
+- **Recipients are chips**: ⌫ takes out a whole recipient, a click shows its address. A chip
+  shows the name alone for people your mail knows under that name; a recipient a draft came with
+  that it never saw shows the address too. Typing
   suggests people from your mail, those you write to first (the recipients of the last 1000 sent
   mails, the senders of the last 500 in the inbox); `↑/↓` pick, `↩`, `⇥` or a comma take one. A
   typed address becomes a chip at a comma, with `↩` or when you leave the field. Only the
   Mail scopes are needed, so no new consent.
 - **Sending only in the app**, from the draft (Send or ⌘↩). The CLI and its MCP server are
   built without the sending code (`jm-core` feature `send`, enabled only for the app): agents can
-  prepare drafts, a person sends them.
+  prepare drafts, a person sends them. And what goes out is what that person saw: right before
+  sending, the draft on the server is compared with what the window showed (text, subject,
+  recipients, files). If `jm` or another program changed it meanwhile, nothing is sent; the
+  window shows the new state to be read and sent again. An open draft that `jm` changes shows
+  the change by itself.
 
 ## CLI
 
@@ -69,6 +77,10 @@ Exit codes: 0 ok, 1 general/Graph, 2 auth, 3 validation, 4 not found, 5 network.
 
 The CLI tells a running app what changed (`~/.config/just-mail/events.jsonl`), so a draft written by
 an agent shows up right away. `Y` in the app copies the short id of the open mail.
+
+Through MCP, attachments are saved to `~/Downloads` or a folder the agent names, but never into
+hidden folders or `~/Library`, where a file from a mail could become something that runs. What
+`jm` prints for a terminal has no control characters (a mail cannot steer the terminal).
 
 ## Setup
 

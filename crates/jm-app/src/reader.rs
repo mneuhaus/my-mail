@@ -202,11 +202,12 @@ impl MailApp {
         let body = match &mut self.mail_view {
             Some(view) => {
                 let mut key = DefaultHasher::new();
-                for (id, pictures) in [(&m.id, opened.pictures.len())]
+                // a draft below the mail keeps its id when `jm` writes it anew: its date tells
+                for (message, pictures) in [(m, opened.pictures.len())]
                     .into_iter()
-                    .chain(opened.thread.iter().map(|t| (&t.message.id, t.pictures.len())))
+                    .chain(opened.thread.iter().map(|t| (&t.message, t.pictures.len())))
                 {
-                    (id, pictures).hash(&mut key);
+                    (&message.id, pictures, message.last_modified_date_time).hash(&mut key);
                 }
                 view.show(key.finish(), || cards(opened), opened.images_loaded, &Palette::of(cx));
                 view.element().into_any_element()
@@ -248,11 +249,24 @@ impl MailApp {
                 }
             }
             WebMessage::Edit(id) => {
-                if let Pane::Reader(opened) = &self.pane {
+                // only a draft the page shows below the mail
+                if let Pane::Reader(opened) = &self.pane
+                    && opened.thread.iter().any(|later| later.message.is_draft && later.message.id == id)
+                {
                     let account = opened.account;
                     self.open_draft(account, id, window, cx);
                 }
             }
+            WebMessage::Focused => {
+                if matches!(self.pane, Pane::Reader(_)) {
+                    self.focus_list(window, cx);
+                }
+            }
+            WebMessage::Ended => match &self.pane {
+                // the next paint loads the mail again, the editor its text as last reported
+                Pane::Composer(composer) => composer.update(cx, |c, cx| c.reload_page(cx)),
+                _ => cx.notify(),
+            },
             WebMessage::Editor(message) => {
                 if let Pane::Composer(composer) = &self.pane {
                     composer.update(cx, |c, cx| c.on_editor(message, window, cx));
@@ -281,7 +295,8 @@ fn cards(opened: &Opened) -> Vec<Card> {
         let to = m.to_recipients.iter().chain(&m.cc_recipients).map(Recipient::display).collect::<Vec<_>>().join(", ");
         Card {
             head: Some(CardHead {
-                sender: if m.is_draft { tr!("Draft", "Entwurf").to_string() } else { m.sender() },
+                // with the address: a name alone is whatever its sender likes
+                sender: if m.is_draft { tr!("Draft", "Entwurf").to_string() } else { m.from.as_ref().map(Recipient::full).unwrap_or_default() },
                 date: util::long_date(m.date()),
                 to: if to.is_empty() { to } else { format!("{} {to}", tr!("To", "An")) },
                 draft: m.is_draft.then(|| m.id.clone()),
