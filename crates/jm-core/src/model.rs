@@ -297,11 +297,23 @@ pub struct NewAttachment {
 
 impl NewAttachment {
     pub fn from_path(path: &std::path::Path) -> crate::Result<Self> {
+        // looked at before it is read: a folder, a device or a file no mail could carry
+        let about = std::fs::metadata(path).map_err(|e| crate::Error::not_found(format!("{}: {e}", path.display())))?;
+        if !about.is_file() {
+            return Err(crate::Error::validation(format!("{} is not a file", path.display())));
+        }
+        if about.len() > MAX_FILE_BYTES {
+            return Err(crate::Error::validation(format!("{} is larger than 150 MB", path.display()))
+                .hint("share large files as a link instead"));
+        }
         let bytes = std::fs::read(path).map_err(|e| crate::Error::not_found(format!("{}: {e}", path.display())))?;
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "attachment".into());
         Ok(NewAttachment { content_type: content_type_for(&name).to_string(), name, bytes })
     }
 }
+
+/// The largest file a mail takes as an attachment at all.
+const MAX_FILE_BYTES: u64 = 150 * 1024 * 1024;
 
 pub fn content_type_for(name: &str) -> &'static str {
     let ext = name.rsplit('.').next().unwrap_or_default().to_lowercase();

@@ -19,10 +19,13 @@ use crate::model::*;
 
 const GRAPH: &str = "https://graph.microsoft.com/v1.0";
 
-/// Graph endpoint; `JUST_MAIL_GRAPH_URL` points everything at another server (the demo in
-/// `tools/demo`, tests).
+/// Graph endpoint; `JUST_MAIL_GRAPH_URL` points everything at a server on this machine (the demo
+/// in `tools/demo`, tests). Nowhere else: every request carries the account's token.
 fn graph_base() -> String {
-    std::env::var("JUST_MAIL_GRAPH_URL").unwrap_or_else(|_| GRAPH.to_string())
+    match std::env::var("JUST_MAIL_GRAPH_URL") {
+        Ok(url) if url.starts_with("http://127.0.0.1:") || url.starts_with("http://localhost:") => url,
+        _ => GRAPH.to_string(),
+    }
 }
 const PREFER_IDS: &str = "IdType=\"ImmutableId\"";
 const PREFER_HTML: &str = "IdType=\"ImmutableId\", outlook.body-content-type=\"html\"";
@@ -150,6 +153,10 @@ impl Mailbox {
     /// Send one request; refreshes the token once on 401 and waits out throttling.
     fn call(&self, method: &str, url: &str, prefer: &str, body: Option<&Value>) -> Result<ureq::Response> {
         let url = if url.starts_with("https://") || url.starts_with("http://") {
+            // a link Graph gave (the next page): the token goes to Graph and nowhere else
+            if !url.starts_with(&graph_base()) {
+                return Err(Error::general("Graph pointed to another server, which is not followed"));
+            }
             url.to_string()
         } else {
             format!("{}{url}", graph_base())
@@ -175,7 +182,9 @@ impl Mailbox {
                     refreshed = true;
                     self.access_token(true)?;
                 }
-                Err(ureq::Error::Status(429 | 503 | 504, resp)) if attempts < 4 => {
+                // 504: Graph gave up waiting, but what was asked for may have happened (a mail
+                // sent, a draft made): only what can safely happen twice is asked again
+                Err(ureq::Error::Status(status @ (429 | 503 | 504), resp)) if attempts < 4 && (status != 504 || method != "POST") => {
                     let wait = resp.header("Retry-After").and_then(|v| v.parse::<u64>().ok()).unwrap_or(2 * attempts);
                     std::thread::sleep(Duration::from_secs(wait.min(30)));
                 }
@@ -437,7 +446,8 @@ impl Mailbox {
         let attachments = self.attachments(id)?;
         let picks: Vec<(&Attachment, String)> = attachments
             .iter()
-            .filter(|a| a.is_file() && a.size <= 2 * 1024 * 1024)
+            // what Just Mail puts into a text is at most `MAX_ATTACHMENT_BYTES` (Graph counts a little more)
+            .filter(|a| a.is_file() && a.size <= 4 * 1024 * 1024)
             .filter_map(|a| {
                 let cid = html::content_id(a.content_id.as_deref()?);
                 wanted.iter().any(|w| w.eq_ignore_ascii_case(&cid)).then_some((a, cid))
@@ -540,7 +550,8 @@ impl Mailbox {
             msg["attachments"] = Value::Array(attachments);
         }
         let created: Message = self.json("POST", "/me/messages", PREFER_IDS, Some(&msg))?;
-        self.message(&created.id)
+        // made it is: if it cannot be read back right now, a second one must not follow
+        self.message(&created.id).or(Ok(created))
     }
 
     /// Change a draft. A new body replaces only the author's part when the draft has Just

@@ -199,6 +199,23 @@ fn load_files(paths: &[PathBuf]) -> Result<Vec<NewAttachment>> {
         .collect()
 }
 
+/// Whether an agent may have attachments saved into `dir`: not into hidden folders or
+/// `~/Library`, where a file from a mail could become something that runs (a launch agent, a
+/// shell's or an agent's own settings). The `jm download` command of a person takes any folder.
+pub fn download_folder_for_agents(dir: &Path) -> Result<()> {
+    let dir = expand_home(dir);
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let hidden = dir.components().any(|part| {
+        let name = part.as_os_str().to_string_lossy();
+        name == ".." || (name.starts_with('.') && name != ".")
+    });
+    if hidden || dir.starts_with(home.join("Library")) {
+        return Err(Error::validation(format!("attachments are not saved into {}", dir.display()))
+            .hint("hidden folders and ~/Library are off limits here; use a folder like ~/Downloads"));
+    }
+    Ok(())
+}
+
 fn expand_home(path: &Path) -> PathBuf {
     match (path.strip_prefix("~"), std::env::var_os("HOME")) {
         (Ok(rest), Some(home)) => PathBuf::from(home).join(rest),
@@ -342,7 +359,7 @@ pub fn accounts_add() -> Result<Value> {
 
 fn copy_to_clipboard(text: &str) -> bool {
     use std::io::Write as _;
-    let Ok(mut child) = Command::new("pbcopy").stdin(Stdio::piped()).spawn() else { return false };
+    let Ok(mut child) = Command::new("/usr/bin/pbcopy").stdin(Stdio::piped()).spawn() else { return false };
     let wrote = child.stdin.take().map(|mut s| s.write_all(text.as_bytes()).is_ok()).unwrap_or(false);
     child.wait().map(|s| s.success()).unwrap_or(false) && wrote
 }
@@ -765,7 +782,7 @@ pub fn delete_draft(ctx: &Ctx, id: &str) -> Result<Value> {
 
 fn app_running() -> bool {
     ["just-mail", "Just Mail"].iter().any(|name| {
-        Command::new("pgrep")
+        Command::new("/usr/bin/pgrep")
             .args(["-x", name])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -781,7 +798,7 @@ pub fn open(ctx: &Ctx, id: &str) -> Result<Value> {
     let was_running = app_running();
     let mut note = None;
     if !was_running {
-        let started = Command::new("open")
+        let started = Command::new("/usr/bin/open")
             .args(["-b", APP_BUNDLE_ID])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -799,7 +816,7 @@ pub fn open(ctx: &Ctx, id: &str) -> Result<Value> {
             std::thread::sleep(Duration::from_secs(2));
             // A cold start from the background leaves the app inactive, and GPUI only gets going
             // once it is activated; asking again activates the now running app.
-            let _ = Command::new("open").args(["-b", APP_BUNDLE_ID]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+            let _ = Command::new("/usr/bin/open").args(["-b", APP_BUNDLE_ID]).stdout(Stdio::null()).stderr(Stdio::null()).status();
             note = Some("Just Mail was not running and has been started".to_string());
         } else {
             note = Some(format!("Just Mail is not running and could not be started (bundle {APP_BUNDLE_ID})"));
@@ -814,6 +831,16 @@ pub fn open(ctx: &Ctx, id: &str) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agents_save_attachments_only_where_nothing_runs() {
+        for bad in ["~/Library/LaunchAgents", "~/.claude/skills/x", "/tmp/../Users/x/.ssh", "~/.config/fish/conf.d", ".hidden"] {
+            assert!(download_folder_for_agents(Path::new(bad)).is_err(), "{bad}");
+        }
+        for good in ["~/Downloads", "~/Documents/Belege 2026", "/tmp/jm", "./attachments"] {
+            assert!(download_folder_for_agents(Path::new(good)).is_ok(), "{good}");
+        }
+    }
 
     fn now() -> DateTime<Local> {
         Local.with_ymd_and_hms(2026, 10, 8, 15, 30, 0).unwrap()

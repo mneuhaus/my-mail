@@ -167,37 +167,65 @@ fn attr_value(lower: &str, tag_start: usize, tag_end: usize, name: &str) -> Opti
 
 /// Put `blocks` at the very top of an existing document (above a reply's quote).
 pub fn insert_at_top(document: &str, blocks: &str) -> String {
-    match find_tag_end(document, "<body") {
+    match body_start(document) {
         Some(end) => format!("{}\n{}{}", &document[..end], blocks, &document[end..]),
         None => format!("{blocks}<br>\n{document}"),
     }
 }
 
-/// Byte offset right after the `>` of the first `tag` (case-insensitive), e.g. `<body …>`.
-fn find_tag_end(html: &str, tag: &str) -> Option<usize> {
+/// Byte offset right after the document's `<body …>` tag. A `<body` in a comment or inside a
+/// style, script or title is none: a mail can put anything there, and a reply's text set down
+/// behind it would never show.
+fn body_start(html: &str) -> Option<usize> {
     let lower = html.to_ascii_lowercase();
-    let start = lower.find(tag)?;
-    // make sure we matched `<body` and not `<bodyfoo`
-    let next = lower[start + tag.len()..].chars().next()?;
-    if !(next == '>' || next.is_whitespace()) {
-        return None;
+    let mut pos = 0;
+    while let Some(lt) = lower[pos..].find('<').map(|i| pos + i) {
+        let rest = &lower[lt..];
+        if rest.starts_with("<!--") {
+            pos = lt + rest.find("-->").map_or(rest.len(), |i| i + 3);
+            continue;
+        }
+        let name: String = rest[1..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        let gt = rest.find('>')?;
+        match name.as_str() {
+            "body" => return Some(lt + gt + 1),
+            // their content is raw text up to their end tag
+            "style" | "script" | "title" | "textarea" | "xmp" => {
+                let close = format!("</{name}");
+                pos = lt + rest[gt..].find(&close).map_or(rest.len(), |i| gt + i + close.len());
+            }
+            _ => pos = lt + gt + 1,
+        }
     }
-    lower[start..].find('>').map(|i| start + i + 1)
+    None
 }
 
-/// Inner HTML range of the element with `id`. Exchange may rewrite quotes or add an `x_`
-/// prefix, so both spellings are tried.
-fn element_inner(html: &str, id: &str) -> Option<(usize, usize)> {
+/// The element with `id` that stands at `at` (after white space; with `nested` also as the first
+/// thing inside elements that start there): `(start, end)` of what it holds and where its end
+/// tag ends. Exchange may rewrite quotes or add an `x_` prefix, so those spellings count too.
+/// Nowhere else: a quoted mail that Just Mail wrote has blocks with these ids as well.
+fn block_at(html: &str, at: usize, id: &str, nested: bool) -> Option<(usize, usize, usize)> {
     let lower = html.to_ascii_lowercase();
-    let needles =
-        [format!("id=\"{id}\""), format!("id={id}"), format!("id='{id}'"), format!("id=\"x_{id}\"")];
-    let attr = needles.iter().find_map(|n| lower.find(n.as_str()))?;
-    let open_start = lower[..attr].rfind('<')?;
-    let tag: String = lower[open_start + 1..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+    let needles = [format!("id=\"{id}\""), format!("id={id}"), format!("id='{id}'"), format!("id=\"x_{id}\"")];
+    let mut open_start = at + (lower[at..].len() - lower[at..].trim_start().len());
+    let (tag, inner_start) = loop {
+        if !lower[open_start..].starts_with('<') || lower[open_start..].starts_with("</") {
+            return None;
+        }
+        let open_end = open_start + lower[open_start..].find('>')?;
+        if needles.iter().any(|n| lower[open_start..open_end].contains(n.as_str())) {
+            let tag: String = lower[open_start + 1..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+            break (tag, open_end + 1);
+        }
+        if !nested {
+            return None;
+        }
+        let after = &lower[open_end + 1..];
+        open_start = open_end + 1 + (after.len() - after.trim_start().len());
+    };
     if tag.is_empty() {
         return None;
     }
-    let inner_start = open_start + lower[open_start..].find('>')? + 1;
     let open = format!("<{tag}");
     let close = format!("</{tag}");
     let mut depth = 1;
@@ -213,7 +241,8 @@ fn element_inner(html: &str, id: &str) -> Option<(usize, usize)> {
             _ => {
                 depth -= 1;
                 if depth == 0 {
-                    return Some((inner_start, next_close));
+                    let after = lower[next_close..].find('>').map_or(lower.len(), |i| next_close + i + 1);
+                    return Some((inner_start, next_close, after));
                 }
                 pos = next_close + close.len();
             }
@@ -222,27 +251,37 @@ fn element_inner(html: &str, id: &str) -> Option<(usize, usize)> {
     None
 }
 
+/// The author's block: the first thing in the body.
+fn author_block(document: &str) -> Option<(usize, usize, usize)> {
+    block_at(document, body_start(document).unwrap_or(0), BODY_ID, true)
+}
+
+/// The signature block: right after the author's.
+fn signature_block(document: &str) -> Option<(usize, usize, usize)> {
+    let (_, _, after) = author_block(document)?;
+    block_at(document, after, SIGNATURE_ID, false)
+}
+
 /// The author's part of a draft as HTML, if the draft has Just Mail's markers.
 pub fn author_html(document: &str) -> Option<&str> {
-    element_inner(document, BODY_ID).map(|(s, e)| &document[s..e])
+    author_block(document).map(|(s, e, _)| &document[s..e])
 }
 
 /// Replace the author's part of a draft, leaving signature and quote as they are. `None` when
 /// the draft has no Just Mail markers (the caller then builds a whole new document).
 pub fn replace_author_html(document: &str, body_html: &str) -> Option<String> {
-    element_inner(document, BODY_ID).map(|(s, e)| format!("{}{}{}", &document[..s], body_html, &document[e..]))
+    author_block(document).map(|(s, e, _)| format!("{}{}{}", &document[..s], body_html, &document[e..]))
 }
 
 /// Whether the draft already carries a signature block.
 pub fn has_signature(document: &str) -> bool {
-    element_inner(document, SIGNATURE_ID).is_some()
+    signature_block(document).is_some()
 }
 
 /// The quoted mail of a reply or forward draft: what follows the signature block (or, without
 /// one, the author's block), up to `</body>`. `None` for a new mail or a draft without markers.
 pub fn quote_html(document: &str) -> Option<&str> {
-    let (_, inner_end) = element_inner(document, SIGNATURE_ID).or_else(|| element_inner(document, BODY_ID))?;
-    let after = document[inner_end..].find('>').map(|i| inner_end + i + 1)?;
+    let (_, _, after) = signature_block(document).or_else(|| author_block(document))?;
     let rest = &document[after..];
     // ASCII lowercasing keeps byte offsets
     let rest = match rest.to_ascii_lowercase().rfind("</body") {
@@ -959,6 +998,34 @@ mod tests {
         let reply = insert_at_top("<html><body><hr><div>Von: Tom</div><div>alte Mail</div></body></html>", &compose_blocks("Danke", "<div>Marc</div>"));
         let quote = quote_html(&reply).unwrap();
         assert!(quote.contains("alte Mail") && !quote.contains("Danke") && !quote.contains("Marc"));
+    }
+
+    #[test]
+    fn blocks_count_only_where_just_mail_puts_them() {
+        // a quoted mail that Just Mail wrote has blocks of its own, as Exchange renames them
+        let quoted = "<div id=\"x_jm-body\">alter Text</div><div id=\"x_jm-signature\">alte Signatur</div>";
+        let outlook = format!("<html><body><p>In Outlook geschrieben</p><hr>{quoted}</body></html>");
+        assert_eq!(author_html(&outlook), None);
+        assert!(!has_signature(&outlook));
+        // a reply without a signature: the quote's signature is not its own
+        let reply = insert_at_top(&format!("<html><body><hr>{quoted}</body></html>"), &compose_blocks("Danke", ""));
+        assert_eq!(author_html(&reply), Some("Danke"));
+        assert!(!has_signature(&reply));
+        assert!(quote_html(&reply).unwrap().contains("alter Text"));
+        // Outlook wraps what it saves: still the first thing in the body
+        let wrapped = "<html><body><div class=\"WordSection1\">\n<div id=\"jm-body\">Text</div><div id=\"jm-signature\">S</div></div></body></html>";
+        assert_eq!(author_html(wrapped), Some("Text"));
+        assert!(has_signature(wrapped));
+    }
+
+    #[test]
+    fn a_body_tag_in_a_style_or_a_comment_is_none() {
+        let hostile = "<html><head><!-- <body> --><style>/* <body > */ p{}</style><title><body></title></head>\
+                       <BODY dir=\"ltr\"><hr>quote</body></html>";
+        let out = insert_at_top(hostile, &compose_blocks("answer", ""));
+        assert!(out.contains("<BODY dir=\"ltr\">\n<div id=\"jm-body\""), "{out}");
+        assert_eq!(author_html(&out), Some("answer"));
+        assert_eq!(insert_at_top("no body", "<b>x</b>"), "<b>x</b><br>\nno body");
     }
 
     #[test]

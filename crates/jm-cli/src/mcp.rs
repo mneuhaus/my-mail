@@ -91,9 +91,12 @@ fn initialize(params: &Value) -> Value {
 
 /// Run a tool; failures come back as `isError` results the model can read and fix.
 pub fn call_tool(name: &str, args: &Value) -> Value {
-    let (text, is_error) = match run_tool(name, args) {
-        Ok(value) => (value.to_string(), false),
-        Err(e) => (json!({ "error": e }).to_string(), true),
+    // a tool that panics (on a mail no one foresaw) must not take the server along
+    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_tool(name, args)));
+    let (text, is_error) = match ran {
+        Ok(Ok(value)) => (value.to_string(), false),
+        Ok(Err(e)) => (json!({ "error": e }).to_string(), true),
+        Err(_) => (json!({ "error": { "message": "the tool failed unexpectedly" } }).to_string(), true),
     };
     json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
 }
@@ -136,6 +139,9 @@ fn run_tool(name: &str, args: &Value) -> Result<Value> {
         "get_message" => ops::show(&ctx()?, &a.str("id")?, a.flag("html")?, false),
         "download_attachments" => {
             let dir = a.opt_str("dir")?.map(PathBuf::from);
+            if let Some(dir) = &dir {
+                ops::download_folder_for_agents(dir)?;
+            }
             ops::download(&ctx()?, &a.str("id")?, &a.list("names")?, dir.as_deref())
         }
         "set_flag" => {
@@ -343,7 +349,7 @@ pub fn tools() -> Vec<Value> {
             json!({
                 "id": id,
                 "names": { "type": "array", "items": { "type": "string" }, "description": "Attachment names to save" },
-                "dir": { "type": "string", "description": "Target folder" }
+                "dir": { "type": "string", "description": "Target folder (default ~/Downloads; not a hidden folder, not ~/Library)" }
             }),
             &["id"],
             false,

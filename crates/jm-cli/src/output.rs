@@ -25,8 +25,16 @@ pub enum View {
 const WHO_WIDTH: usize = 24;
 const SUBJECT_WIDTH: usize = 90;
 
+/// What a terminal shows of `text`: line breaks and tabs, but no other control characters. A
+/// mail could move the cursor with them, rewrite what stands above, or reach the clipboard.
+fn for_terminal(text: String) -> String {
+    text.chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')).collect()
+}
+
 pub fn render(view: View, v: &Value) -> String {
-    match view {
+    // HTML and the raw message are asked for as they are (to keep in a file)
+    let exact = matches!(view, View::Html | View::Raw);
+    let text = match view {
         View::Accounts => accounts(v),
         View::AccountChange => account_change(v),
         View::Signatures => signatures(v),
@@ -41,7 +49,8 @@ pub fn render(view: View, v: &Value) -> String {
         View::Draft => draft(v),
         View::Deleted => format!("deleted draft {} ({})\n", s(&v["id"]), s(&v["account"])),
         View::Opened => opened(v),
-    }
+    };
+    if exact { text } else { for_terminal(text) }
 }
 
 fn s(v: &Value) -> &str {
@@ -366,6 +375,14 @@ fn opened(v: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_mail_cannot_steer_the_terminal() {
+        let v = serde_json::json!({ "message": { "subject": "Hi\u{1b}]52;c;ZXZpbA==\u{7}\u{9b}2J", "text": "a\tb\r\nc\u{1b}[2J" } });
+        let shown = render(View::Message, &v);
+        assert!(!shown.contains(['\u{1b}', '\u{7}', '\u{9b}', '\r']), "{shown:?}");
+        assert!(shown.contains("a\tb\nc[2J"), "{shown:?}");
+    }
 
     #[test]
     fn truncates_on_character_boundaries() {
